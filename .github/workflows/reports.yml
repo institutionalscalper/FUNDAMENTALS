@@ -18,6 +18,8 @@ on:
     - cron: '30 21 * * 1-5'  # 21:30 UK winter
     - cron: '50 20 * * 1-5'  # 21:50 UK summer  - bot health summary to #bot-health
     - cron: '50 21 * * 1-5'  # 21:50 UK winter
+    - cron: '*/15 6-21 * * 1-5'   # breaking news every 15 min (bot.js keeps 07:00-22:00 UK)
+    - cron: '7 */2 * * 0,6'       # breaking news every 2 h at weekends
   workflow_dispatch:
     inputs:
       slot:
@@ -25,7 +27,7 @@ on:
         required: true
         default: morning
         type: choice
-        options: [morning, midday, post1, preny, post2, earnings, health]
+        options: [morning, midday, post1, preny, post2, earnings, health, news]
 
 permissions:
   actions: read      # lets the health check read today's runs and logs
@@ -40,11 +42,23 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+      # the news check remembers which headlines it has already seen (news_state.json), kept between runs here
+      - uses: actions/cache/restore@v4
+        with:
+          path: news_state.json
+          key: news-state-${{ github.run_id }}
+          restore-keys: news-state-
       - run: node bot.js
         env:
+          NEWS_WEBHOOK: ${{ secrets.NEWS_WEBHOOK }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           HEALTH_WEBHOOK: ${{ secrets.HEALTH_WEBHOOK }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CRON: ${{ github.event.schedule }}
           SLOT: ${{ github.event.inputs.slot }}
+      - uses: actions/cache/save@v4
+        if: always() && hashFiles('news_state.json') != ''
+        with:
+          path: news_state.json
+          key: news-state-${{ github.run_id }}

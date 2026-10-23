@@ -192,7 +192,8 @@ function buildEmbed(slot, r, n, extra = {}) {
   if (n.nq) nums.push(`**NQ** ${sgn(n.nq.chg)} pts`);
   if (n.tnx) nums.push(`**10y** ${n.tnx.px.toFixed(2)}% (${sgn(n.tnx.chg * 100)} bp)`);
   if (n.dxy) nums.push(`**DXY** ${n.dxy.px.toFixed(2)} (${sgn(n.dxy.pct, 2)}%)`);
-  if (nums.length && slot !== 'earnings') parts.push(nums.join(' · '));
+  // bias on its own underlined line (Discord titles can't be underlined); the numbers sit right under it
+  parts.push(`__**NQ bias ${bias}${conf ? ' · confidence ' + conf : ''}**__` + (nums.length && slot !== 'earnings' ? '\n' + nums.join(' · ') : ''));
   if (r.result?.length) parts.push('**RESULT**\n' + r.result.map(x => '• ' + x).join('\n'));
   if (r.why?.length) parts.push('**WHY**\n' + r.why.map(x => '• ' + x).join('\n'));
   if (extra.calendar) parts.push(`**${extra.calendarTitle}**\n` + (extra.calendar.length ? calendarLines(extra.calendar).join('\n') : 'No medium or high impact US data.'));
@@ -202,7 +203,7 @@ function buildEmbed(slot, r, n, extra = {}) {
   if (r.change?.length) parts.push('**WHAT WOULD CHANGE IT**\n' + r.change.map(x => '• ' + x).join('\n'));
   if (r.headlines?.length) parts.push('**HEADLINES**\n' + r.headlines.slice(0, 3).map(x => '• ' + x).join('\n'));
   return {
-    title: cut(`${SLOTS[slot].title}${r.headline ? ': ' + r.headline : ''} · NQ bias ${bias}${conf ? ' · confidence ' + conf : ''}`, 256),
+    title: cut(`${SLOTS[slot].title}${r.headline ? ': ' + r.headline : ''}`, 256),
     description: cut(parts.join('\n\n​\n'), 4000),   // blank line + invisible line = a wider gap between sections (Discord drops plain extra blank lines)
     color: COLOR[bias] ?? COLOR.NEUTRAL,
     footer: { text: `${DISCLAIMER} · next report ${SLOTS[slot].next} · calendar & earnings: Nasdaq` },
@@ -218,8 +219,8 @@ function backupEmbed(slot, n) {
   if (n.dxy) { score -= Math.sign(n.dxy.chg); used++; }
   const bias = score >= 2 ? 'BULLISH' : score <= -2 ? 'BEARISH' : 'NEUTRAL';
   return {
-    title: `${SLOTS[slot].title} (basic) · NQ bias ${bias}`,
-    description: numbersText(n) + `\n\nRule: NQ up, yield down and dollar down each count bullish (opposite = bearish). Score ${sgn(score)} of ${used}.\nThe full AI report was not available this time.`,
+    title: `${SLOTS[slot].title} (basic)`,
+    description: `__**NQ bias ${bias}**__\n` + numbersText(n) + `\n\nRule: NQ up, yield down and dollar down each count bullish (opposite = bearish). Score ${sgn(score)} of ${used}.\nThe full AI report was not available this time.`,
     color: COLOR[bias], footer: { text: `${DISCLAIMER} · next report ${SLOTS[slot].next}` }, timestamp: new Date().toISOString(),
   };
 }

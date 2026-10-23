@@ -2,17 +2,17 @@
 // Runs on GitHub Actions (free). Secrets: GEMINI_API_KEY, DISCORD_WEBHOOK.
 // Env: CRON (the schedule that fired, set by the workflow) or SLOT (manual run), DRY=1 prints instead of posting.
 // All report times are New York time (ET), so they follow the US market through both clock changes. Each has two crons
-// (US summer / winter time); the one that doesn't match today's New York clock exits quietly. Times shown in reports are UK time.
+// (US summer / winter time); the one that doesn't match today's New York clock exits quietly. All times shown are New York time (ET).
 const fs = require('fs');
 const path = require('path');
 
 const SLOTS = {
-  morning:  { ny: '02:00', title: '🌅 MORNING BRIEF',        next: d => `${slotUk('midday', d)} UK` },
-  midday:   { ny: '08:00', title: '📊 MIDDAY',               next: d => `after any ${nyToUk(d, '08:30')} data, or ${slotUk('preny', d)} UK` },
-  post1:    { ny: '08:32', title: '⚡ DATA RESULT',          next: d => `${slotUk('preny', d)} UK` },
-  preny:    { ny: '09:25', title: '🔔 BEFORE THE NY OPEN',   next: d => `after any ${nyToUk(d, '10:00')} data, or ${slotUk('morning', d)} UK` },
-  post2:    { ny: '10:02', title: '⚡ DATA RESULT',          next: d => `tonight if a big company reports, or ${slotUk('morning', d)} UK` },
-  earnings: { ny: '16:30', title: '📢 EARNINGS',             next: d => `${slotUk('morning', d)} UK` },
+  morning:  { ny: '02:00', title: '🌅 MORNING BRIEF',        next: () => '08:00 ET' },
+  midday:   { ny: '08:00', title: '📊 MIDDAY',               next: () => 'after any 08:30 ET data, or 09:25 ET' },
+  post1:    { ny: '08:32', title: '⚡ DATA RESULT',          next: () => '09:25 ET' },
+  preny:    { ny: '09:25', title: '🔔 BEFORE THE NY OPEN',   next: () => 'after any 10:00 ET data, or 02:00 ET' },
+  post2:    { ny: '10:02', title: '⚡ DATA RESULT',          next: () => 'tonight if a big company reports, or 02:00 ET' },
+  earnings: { ny: '16:30', title: '📢 EARNINGS',             next: () => '02:00 ET' },
   health:   { ny: '16:50', title: '🩺 BOT HEALTH',           next: () => '' },   // daily check of today's runs -> #bot-health
 };
 const slotUk = (name, d) => name === 'morning' ? nyToUk(nextWeekday(d), SLOTS.morning.ny) : nyToUk(d, SLOTS[name].ny);   // a report's UK time (morning = next weekday's)
@@ -89,6 +89,8 @@ const JSON_H = { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' };
 const getJson = async u => (await fetch(u, { headers: JSON_H, signal: AbortSignal.timeout(TIMEOUT.feed) })).json();
 const ukParts = d => Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit',
   hour: '2-digit', minute: '2-digit', weekday: 'short', hourCycle: 'h23' }).formatToParts(d).map(x => [x.type, x.value]));
+// New York clock time "HH:MM" of a moment (default now) - everything shown to readers is in ET
+const et = (d = new Date()) => { const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(d).map(x => [x.type, x.value])); return `${p.hour}:${p.minute}`; };
 const addDays = (ymd, k) => { const d = new Date(ymd + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + k); return d.toISOString().slice(0, 10); };
 
 // which US releases matter for NQ (Nasdaq's calendar has no importance rating)
@@ -109,7 +111,7 @@ async function calendar(ukDate) {
   try {
     return ((await getJson('https://api.nasdaq.com/api/calendar/economicevents?date=' + addDays(ukDate, 1))).data?.rows || [])
       .filter(x => x.country === 'United States' && !SKIP.test(x.eventName) && (HIGH.test(x.eventName) || MEDIUM.test(x.eventName)))
-      .map(x => ({ time: nyToUk(ukDate, x.gmt), impact: HIGH.test(x.eventName) ? 'High' : 'Medium', title: x.eventName, forecast: clean(x.consensus), previous: clean(x.previous), actual: clean(x.actual) }))
+      .map(x => ({ time: nyToUk(ukDate, x.gmt), et: x.gmt, impact: HIGH.test(x.eventName) ? 'High' : 'Medium', title: x.eventName, forecast: clean(x.consensus), previous: clean(x.previous), actual: clean(x.actual) }))
       .sort((a, b) => a.time.localeCompare(b.time));
   } catch { return null; }
 }
@@ -122,7 +124,7 @@ async function earnings(dates) {
       for (const x of (await getJson('https://api.nasdaq.com/api/calendar/earnings?date=' + d)).data?.rows || [])
         // after a company reports, Nasdaq often changes its time to "not supplied" - treat that as a possible after-close report
         if (BIG.has(x.symbol)) out.push({ date: d, symbol: x.symbol, name: x.name, pre: /pre/.test(x.time),
-          when: /after/.test(x.time) ? `after the close (~${nyToUk(d, '16:05')} UK)` : /pre/.test(x.time) ? `before the open (~${nyToUk(d, '07:00')}-${nyToUk(d, '08:00')} UK)` : 'time not given',
+          when: /after/.test(x.time) ? 'after the close (~16:05 ET)' : /pre/.test(x.time) ? 'before the open (~07:00-08:00 ET)' : 'time not given',
           eps: clean(x.epsForecast), actual: /\d/.test(x.eps || '') ? clean(x.eps) : '', surprise: /\d/.test(x.surprise || '') ? clean(x.surprise) : '' });
     } catch { }
   }));
@@ -138,14 +140,14 @@ function numbersText(n) {
 }
 
 function slotTask(slot, d) {
-  const u = t => nyToUk(d, t);   // New York time -> UK time today
+  const u = t => t + ' ET';
   switch (slot) {
-    case 'morning': return 'MORNING BRIEF before London. Cover overnight news, today\'s US calendar (UK times, with forecasts) and the big NQ earnings this week.';
+    case 'morning': return 'MORNING BRIEF before London. Cover overnight news, today\'s US calendar (ET times, with forecasts) and the big NQ earnings this week.';
     case 'midday': return 'MIDDAY UPDATE. What changed since the morning; the next release and what result would flip the bias.';
-    case 'post1': return `DATA RESULT. If NO high-impact US release came out between ${u('07:25')} and ${u('08:35')} UK time today, return {"skip": true}. Otherwise report actual vs forecast, the immediate reaction in yields/NQ, and whether the bias changes.`;
-    case 'post2': return `DATA RESULT. If NO high-impact or medium-impact US release came out between ${u('09:40')} and ${u('10:05')} UK time today, return {"skip": true}. Otherwise report actual vs forecast, the reaction, and whether the bias changes.`;
+    case 'post1': return `DATA RESULT. If NO high-impact US release came out between ${u('07:25')} and ${u('08:35')} today, return {"skip": true}. Otherwise report actual vs forecast, the immediate reaction in yields/NQ, and whether the bias changes.`;
+    case 'post2': return `DATA RESULT. If NO high-impact or medium-impact US release came out between ${u('09:40')} and ${u('10:05')} today, return {"skip": true}. Otherwise report actual vs forecast, the reaction, and whether the bias changes.`;
     case 'earnings': return 'EARNINGS RESULT for the big Nasdaq-100 companies that reported after the US close today (listed below with EPS vs expected and the after-hours move). If the headlines and data show none of them has actually reported yet, return {"skip": true}. Otherwise for each: revenue and guidance vs expected if the headlines say, why the stock is moving, what it means for NQ, and the NQ bias for tomorrow. Put the key facts in "result".';
-    case 'preny': return `BEFORE THE NY OPEN (${u('09:30')} UK). Bias for the cash session, what to watch in the first hours, the next release. If big companies reported before the open (listed below), explain their results and pre-market moves in "result".`;
+    case 'preny': return `BEFORE THE NY OPEN (${u('09:30')}). Bias for the cash session, what to watch in the first hours, the next release. If big companies reported before the open (listed below), explain their results and pre-market moves in "result".`;
   }
 }
 
@@ -181,7 +183,7 @@ function parseJson(text) {
 const cut = (s, n) => (s = String(s || '')).length > n ? s.slice(0, n - 1) + '…' : s;
 
 const dayName = ymd => new Date(ymd + 'T12:00:00Z').toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'UTC' });
-function calendarLines(evts) { return evts.map(e => `${e.time} ${e.impact === 'High' ? '🔴' : '🟠'} ${e.title}${e.actual ? ` · actual **${e.actual}**` : ''}${e.forecast ? ` · forecast ${e.forecast}` : ''}${e.previous ? ` · previous ${e.previous}` : ''}`); }
+function calendarLines(evts) { return evts.map(e => `${e.et} ${e.impact === 'High' ? '🔴' : '🟠'} ${e.title}${e.actual ? ` · actual **${e.actual}**` : ''}${e.forecast ? ` · forecast ${e.forecast}` : ''}${e.previous ? ` · previous ${e.previous}` : ''}`); }
 const nextWeek = (d, today) => (Date.parse(d) - Date.parse(today)) / 864e5 >= 3 && new Date(today + 'T12:00:00Z').getUTCDay() >= 4;
 const shortName = n => n.replace(/,?\s+(Incorporated|Corporation|Inc\.?|Corp\.?|plc|N\.V\.|Holdings?)(?=[\s,.]|$)|\s+\(The\)/gi, '').replace(/[,\s]+$/, '').trim();
 function earningsLines(list, today) { return list.map(e => `${e.date === today ? '**Today**' : (nextWeek(e.date, today) ? 'Next ' : '') + dayName(e.date)} · **${shortName(e.name)}** (${e.symbol}) · ${e.when}${e.eps ? ` · EPS forecast ${e.eps}` : ''}`); }
@@ -339,22 +341,22 @@ async function newsDesk(uk, desk) {
   for (const k in st.seen) if (now - st.seen[k] > 2 * 864e5) delete st.seen[k];      // remember 2 days
   st.posted = (st.posted || []).filter(p => now - p.t < 864e5);
   if (fresh.length) {
-    const user = `UK time now ${uk.weekday} ${uk.date} ${uk.time}.\n\nAlready posted in the last 24 h (do not repeat):\n${st.posted.map(p => '- ' + p.h).join('\n') || 'none'}\n\nNew headlines:\n${fresh.map(x => `[${x.id}] ${x.title}${x.src ? ' (' + x.src + ')' : ''}`).join('\n')}`;
+    const user = `New York time now ${uk.weekday} ${uk.date} ${et()} ET.\n\nAlready posted in the last 24 h (do not repeat):\n${st.posted.map(p => '- ' + p.h).join('\n') || 'none'}\n\nNew headlines:\n${fresh.map(x => `[${x.id}] ${x.title}${x.src ? ' (' + x.src + ')' : ''}`).join('\n')}`;
     let res;
     try { res = parseJson(await callGemini(desk.system, user, false)); }
-    catch (e) { console.log(`${desk.label} AI failed: ` + e.message); await alert(`⚠️ **${desk.label}** ${uk.time} UK: the AI check failed (${cut(e.message, 200)}) - ${fresh.length} headlines not checked.`); for (const x of fresh) delete st.seen[x.id]; res = { stories: [] }; }
+    catch (e) { console.log(`${desk.label} AI failed: ` + e.message); await alert(`⚠️ **${desk.label}** ${et()} ET: the AI check failed (${cut(e.message, 200)}) - ${fresh.length} headlines not checked.`); for (const x of fresh) delete st.seen[x.id]; res = { stories: [] }; }
     const arrow = v => v === 'up' ? '🟢' : v === 'down' ? '🔴' : '⚪';
     for (const s of (res.stories || []).filter(s => s.score >= NEWS_MIN).sort((a, b) => b.score - a.score).slice(0, 5)) {
       const src = fresh.filter(x => (s.ids || []).map(String).includes(x.id)).sort((a, b) => a.when - b.when)[0] || {};
       const tag = s.score >= 8 ? '🚨 BREAKING' : s.score >= 7 ? '⚠️ NEWS' : desk.tag6;
       const dir = desk.dir[s.direction] || 'Direction unclear';
-      const t = src.when ? ukParts(new Date(src.when)) : null;
+      const t = src.when ? et(new Date(src.when)) : null;
       const moves = Object.entries(s.moves || {}).map(([k, v]) => `${k} ${arrow(v)}`).join(' · ');
       await post({
         title: cut(`${tag} · Impact ${s.score}/10`, 256), url: src.link || undefined,
         description: cut(`**${s.headline}**\n\n​\n__**${dir}**__\n${(s.why || []).map(x => '• ' + x).join('\n\n')}${moves ? `\n\n​\n**Likely moves:** ${moves}` : ''}`, 4000),   // ​ line = wider gap
         color: s.direction === 'RISK_OFF' ? COLOR.BEARISH : s.direction === 'RISK_ON' ? COLOR.BULLISH : COLOR.NEUTRAL,
-        footer: { text: `${t ? t.hour + ':' + t.minute + ' UK · ' : ''}${DISCLAIMER}` }, timestamp: new Date().toISOString(),
+        footer: { text: `${t ? t + ' ET · ' : ''}${DISCLAIMER}` }, timestamp: new Date().toISOString(),
       }, process.env[desk.webhook], desk.username);
       st.posted.push({ t: now, h: s.headline });
       console.log(`${desk.label} posted: ${s.score}/10 ${s.headline}`);
@@ -393,7 +395,7 @@ async function healthCheck(uk) {
     }
     const slot = (log.match(/report: (\w+)/) || [])[1];
     if (!slot && /no report due/.test(log)) continue;                       // the other season's timer
-    const t = ukParts(new Date(run.updated_at)), at = `${t.hour}:${t.minute}`, late = Math.round((Date.parse(run.run_started_at) - Date.parse(run.created_at)) / 60e3);
+    const at = et(new Date(run.updated_at)) + ' ET', late = Math.round((Date.parse(run.run_started_at) - Date.parse(run.created_at)) / 60e3);
     const manual = run.event === 'workflow_dispatch' ? ' (manual test)' : '';
     const model = (log.match(/model used: ([^\r\n]+)/) || [])[1];
     let line;
@@ -407,8 +409,9 @@ async function healthCheck(uk) {
     lines.push(line); if (slot && !manual) seen[slot] = true;
   }
   const nowMin = +uk.time.slice(0, 2) * 60 + +uk.time.slice(3, 5);
-  const missing = REPORT_SLOTS.filter(s => { const t = slotUk(s, uk.date); return !seen[s] && (+t.slice(0, 2) * 60 + +t.slice(3, 5)) + 30 < nowMin; });
-  for (const s of missing) lines.push(`❓ **${s}** (${slotUk(s, uk.date)} UK): no run found - GitHub didn't start it`);
+  const etMin = t => +t.slice(0, 2) * 60 + +t.slice(3, 5);
+  const missing = REPORT_SLOTS.filter(s => !seen[s] && etMin(SLOTS[s].ny) + 30 < etMin(et()));
+  for (const s of missing) lines.push(`❓ **${s}** (${SLOTS[s].ny} ET): no run found - GitHub didn't start it`);
   if (news.runs) lines.push(`${news.failed ? '⚠️' : '📰'} **news**: ${news.runs} checks, ${news.posted} posted${news.scores.length ? ' (scores ' + news.scores.join(', ') + ')' : ''}${news.failed ? `, ${news.failed} failed` : ''}`);
   if (news.runs) lines.push(`${crypto.failed ? '⚠️' : '🪙'} **crypto news**: ${crypto.posted} posted${crypto.scores.length ? ' (scores ' + crypto.scores.join(', ') + ')' : ''}${crypto.failed ? `, ${crypto.failed} checks failed` : ''}`);
   const bad = lines.filter(l => /^(❌|⚠️|❓)/.test(l) && !/manual test/.test(l)).length;
@@ -453,7 +456,7 @@ async function healthCheck(uk) {
     }
     for (const e of today) { const f = due.find(x => x.title === e.title && x.time === e.time); if (f) e.actual = f.actual; }   // the AI sees the fresh numbers too
     if (due.some(e => !e.actual)) await alert(`⚠️ **${slot}**: some actual numbers were still missing after 5 min - posted with what was available.`, 0xf0b232);
-    extra.calendar = due; extra.calendarTitle = 'RELEASED (UK TIME)';
+    extra.calendar = due; extra.calendarTitle = 'RELEASED (ET)';
   }
   if (slot === 'earnings') {
     const ah = earn.filter(e => !e.pre);
@@ -467,8 +470,8 @@ async function healthCheck(uk) {
     for (const e of pm) e.move = await extendedMove(e.symbol, true);
     if (pm.length) { extra.results = pm; extra.resultsTitle = 'RESULTS BEFORE THE OPEN (big NQ companies)'; extra.resultsPre = true; }
   }
-  if (slot === 'morning') { extra.calendar = today; extra.calendarTitle = 'TODAY (UK TIME)'; extra.earnings = earn; }
-  if (slot === 'midday' || slot === 'preny') { extra.calendar = today.filter(e => toMin(e.time) > nowMin); extra.calendarTitle = 'STILL TO COME TODAY (UK TIME)'; }
+  if (slot === 'morning') { extra.calendar = today; extra.calendarTitle = 'TODAY (ET)'; extra.earnings = earn; }
+  if (slot === 'midday' || slot === 'preny') { extra.calendar = today.filter(e => toMin(e.time) > nowMin); extra.calendarTitle = 'STILL TO COME TODAY (ET)'; }
   if (!cal) delete extra.calendar;
 
   // the previous report today and its "what would change it" scenarios
@@ -477,8 +480,8 @@ async function healthCheck(uk) {
   if (!prev || prev.date !== uk.date || prev.slot === slot || !(prev.change || []).length) prev = null;
   extra.prevTitle = prev && prev.title.replace(/^\S+\s/, '');
   const system = fs.readFileSync(path.join(__dirname, 'prompt.md'), 'utf8');
-  const user = `Today is ${uk.weekday} ${uk.date}, UK time now ${uk.time}.\nReport type: ${slotTask(slot, uk.date)}\n\n` +
-    (prev ? `Earlier today the ${extra.prevTitle} (at ${prev.time} UK) had NQ bias ${prev.bias} and said these would change it:\n${prev.change.map(c => '- ' + c).join('\n')}\n` +
+  const user = `Today is ${uk.weekday} ${uk.date}, New York time now ${et()} ET. Write every time as New York time, like "08:30 ET".\nReport type: ${slotTask(slot, uk.date)}\n\n` +
+    (prev ? `Earlier today the ${extra.prevTitle} (at ${prev.time} ET) had NQ bias ${prev.bias} and said these would change it:\n${prev.change.map(c => '- ' + c).join('\n')}\n` +
       `In "scenarios", check each one: start with "✅ Happened", "❌ Didn't happen" or "⏳ Not known yet", then the evidence in a few words and what it means for the bias. Your bias now must agree with what happened.\n\n` : '') +
     `Latest prices (delayed, from a free feed; use these numbers):\n${numbersText(n)}\n\n` +
     `US economic calendar today (UK time; "actual" = already released):\n${cal ? (calendarLines(today).join('\n').replace(/\*\*/g, '') || 'nothing medium/high today') : 'not available'}\n\n` +
@@ -491,13 +494,13 @@ async function healthCheck(uk) {
     const r = parseJson(await callGemini(system, user));
     if (r.skip) { console.log('nothing to report for this slot today - skipped'); return; }
     embed = buildEmbed(slot, r, n, extra);
-    if ((r.change || []).length) fs.writeFileSync(REPORT_STATE, JSON.stringify({ date: uk.date, slot, time: uk.time, title: SLOTS[slot].title, bias: (r.bias || 'NEUTRAL').toUpperCase(), change: r.change }));
+    if ((r.change || []).length) fs.writeFileSync(REPORT_STATE, JSON.stringify({ date: uk.date, slot, time: et(), title: SLOTS[slot].title, bias: (r.bias || 'NEUTRAL').toUpperCase(), change: r.change }));
   } catch (e) {
     console.log('AI report failed: ' + e.message);
-    await alert(`⚠️ **${slot}** ${uk.time} UK: the AI report failed (${cut(e.message, 300)}).\n${['morning', 'midday', 'preny'].includes(slot) ? 'A basic report was posted instead.' : 'Nothing was posted for this result report.'}`);
+    await alert(`⚠️ **${slot}** ${et()} ET: the AI report failed (${cut(e.message, 300)}).\n${['morning', 'midday', 'preny'].includes(slot) ? 'A basic report was posted instead.' : 'Nothing was posted for this result report.'}`);
     if (!['morning', 'midday', 'preny'].includes(slot)) return;
     embed = backupEmbed(slot, n, uk.date);
   }
-  if (!cal) await alert(`⚠️ **${slot}** ${uk.time} UK: the Nasdaq calendar could not be read - report posted without it.`, 0xf0b232);
+  if (!cal) await alert(`⚠️ **${slot}** ${et()} ET: the Nasdaq calendar could not be read - report posted without it.`, 0xf0b232);
   await post(embed);
 })().then(() => process.exit(0), async e => { console.error(e); await alert(`❌ **${status.slot || 'bot'}**: crashed - ${cut(e.message, 500)}`); process.exit(1); });

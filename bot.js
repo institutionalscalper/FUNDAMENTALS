@@ -298,8 +298,17 @@ async function healthCheck(uk) {
   // result reports only run when something actually came out / reported - otherwise skip without using the AI
   if (slot === 'post1' || slot === 'post2') {
     const [a, b] = slot === 'post1' ? [toMin('12:25'), toMin('13:35')] : [toMin('14:40'), toMin('15:05')];
-    const due = today.filter(e => toMin(e.time) >= a && toMin(e.time) <= b);
+    let due = today.filter(e => toMin(e.time) >= a && toMin(e.time) <= b);
     if (cal && !due.length) { console.log('no US release in this window today - skipped'); return; }
+    // Nasdaq can take a few minutes to fill in the actual numbers - wait (up to 5 min) until they're all in
+    for (let k = 0; k < 5 && due.some(e => !e.actual); k++) {
+      console.log(`waiting for actual numbers (${due.filter(e => !e.actual).length} missing)...`);
+      await new Promise(r => setTimeout(r, 60e3));
+      const fresh = await calendar(uk.date);
+      if (fresh) due = fresh.filter(e => toMin(e.time) >= a && toMin(e.time) <= b);
+    }
+    for (const e of today) { const f = due.find(x => x.title === e.title && x.time === e.time); if (f) e.actual = f.actual; }   // the AI sees the fresh numbers too
+    if (due.some(e => !e.actual)) await alert(`⚠️ **${slot}**: some actual numbers were still missing after 5 min - posted with what was available.`, 0xf0b232);
     extra.calendar = due; extra.calendarTitle = 'RELEASED (UK TIME)';
   }
   if (slot === 'earnings') {

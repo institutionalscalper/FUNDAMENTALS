@@ -16,6 +16,8 @@ on:
     - cron: '2 15 * * 1-5'   # 15:02 UK winter
     - cron: '20 20 * * 1-5'  # 21:20 UK summer  - earnings (skipped if no big company reported)
     - cron: '20 21 * * 1-5'  # 21:20 UK winter
+    - cron: '45 20 * * 1-5'  # 21:45 UK summer  - bot health summary to #bot-health
+    - cron: '45 21 * * 1-5'  # 21:45 UK winter
   workflow_dispatch:
     inputs:
       slot:
@@ -23,12 +25,16 @@ on:
         required: true
         default: morning
         type: choice
-        options: [morning, midday, post1, preny, post2, earnings]
+        options: [morning, midday, post1, preny, post2, earnings, health]
+
+permissions:
+  actions: read      # lets the health check read today's runs and logs
+  contents: read
 
 jobs:
   report:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -38,5 +44,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          HEALTH_WEBHOOK: ${{ secrets.HEALTH_WEBHOOK }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CRON: ${{ github.event.schedule }}
           SLOT: ${{ github.event.inputs.slot }}

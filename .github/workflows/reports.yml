@@ -48,6 +48,12 @@ jobs:
           path: news_state.json
           key: news-state-${{ github.run_id }}
           restore-keys: news-state-
+      # the reports remember the last report's "what would change it" points (report_state.json)
+      - uses: actions/cache/restore@v4
+        with:
+          path: report_state.json
+          key: report-state-${{ github.run_id }}
+          restore-keys: report-state-
       - run: node bot.js
         env:
           NEWS_WEBHOOK: ${{ secrets.NEWS_WEBHOOK }}
@@ -62,3 +68,8 @@ jobs:
         with:
           path: news_state.json
           key: news-state-${{ github.run_id }}
+      - uses: actions/cache/save@v4
+        if: always() && hashFiles('report_state.json') != ''
+        with:
+          path: report_state.json
+          key: report-state-${{ github.run_id }}

@@ -14,10 +14,10 @@ on:
     - cron: '25 14 * * 1-5'  # 14:25 UK winter
     - cron: '2 14 * * 1-5'   # 15:02 UK summer  - data result (skipped if no release)
     - cron: '2 15 * * 1-5'   # 15:02 UK winter
-    - cron: '20 20 * * 1-5'  # 21:20 UK summer  - earnings (skipped if no big company reported)
-    - cron: '20 21 * * 1-5'  # 21:20 UK winter
-    - cron: '45 20 * * 1-5'  # 21:45 UK summer  - bot health summary to #bot-health
-    - cron: '45 21 * * 1-5'  # 21:45 UK winter
+    - cron: '30 20 * * 1-5'  # 21:30 UK summer  - earnings (skipped if no big company reported)
+    - cron: '30 21 * * 1-5'  # 21:30 UK winter
+    - cron: '50 20 * * 1-5'  # 21:50 UK summer  - bot health summary to #bot-health
+    - cron: '50 21 * * 1-5'  # 21:50 UK winter
   workflow_dispatch:
     inputs:
       slot:

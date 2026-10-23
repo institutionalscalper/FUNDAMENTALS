@@ -12,7 +12,9 @@ const SLOTS = {
   preny:    { uk: '14:25', title: '🔔 BEFORE THE NY OPEN',   next: 'after the 15:00 data, or 07:00 UK' },
   post2:    { uk: '15:02', title: '⚡ DATA RESULT',          next: 'tonight if a big company reports, or 07:00 UK' },
   earnings: { uk: '21:20', title: '📢 EARNINGS',             next: '07:00 UK' },
+  health:   { uk: '21:45', title: '🩺 BOT HEALTH',           next: '' },   // daily check of today's runs -> #bot-health
 };
+const REPORT_SLOTS = ['morning', 'midday', 'post1', 'preny', 'post2', 'earnings'];
 const MODELS = (process.env.MODEL || 'gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite').split(',');
 const FEEDS = [
   'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114',
@@ -144,7 +146,7 @@ async function callGemini(system, user) {
       const j = await r.json();
       if (!r.ok) { lastErr = new Error(`${tag}: ${r.status}`); console.log(`${tag}: ${r.status} ${JSON.stringify(j.error || j).slice(0, 1500)}`); continue; }
       const text = (j.candidates?.[0]?.content?.parts || []).filter(p => p.text && !p.thought).map(p => p.text).join('\n');
-      if (text.trim()) { console.log('model used: ' + tag); return text; }
+      if (text.trim()) { console.log('model used: ' + tag); status.model = tag; return text; }
       lastErr = new Error(`${tag}: empty answer`); console.log(lastErr.message);
     } catch (e) { lastErr = e; console.log(`${tag}: ${e.message}`); }
   }
@@ -161,7 +163,8 @@ const cut = (s, n) => (s = String(s || '')).length > n ? s.slice(0, n - 1) + '�
 
 const dayName = ymd => new Date(ymd + 'T12:00:00Z').toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'UTC' });
 function calendarLines(evts) { return evts.map(e => `${e.time} ${e.impact === 'High' ? '🔴' : '🟠'} ${e.title}${e.actual ? ` · actual **${e.actual}**` : ''}${e.forecast ? ` · forecast ${e.forecast}` : ''}${e.previous ? ` · previous ${e.previous}` : ''}`); }
-function earningsLines(list, today) { return list.map(e => `${e.date === today ? '**Today**' : dayName(e.date)} · **${e.name.replace(/,? Inc\.?|\s+Corporation|\s+Incorporated/g, '')}** (${e.symbol}) · ${e.when}${e.eps ? ` · EPS forecast ${e.eps}` : ''}`); }
+const nextWeek = (d, today) => (Date.parse(d) - Date.parse(today)) / 864e5 >= 3 && new Date(today + 'T12:00:00Z').getUTCDay() >= 4;
+function earningsLines(list, today) { return list.map(e => `${e.date === today ? '**Today**' : (nextWeek(e.date, today) ? 'Next ' : '') + dayName(e.date)} · **${e.name.replace(/,? Inc\.?|\s+Corporation|\s+Incorporated/g, '')}** (${e.symbol}) · ${e.when}${e.eps ? ` · EPS forecast ${e.eps}` : ''}`); }
 
 function buildEmbed(slot, r, n, extra = {}) {
   const bias = (r.bias || 'NEUTRAL').toUpperCase(), conf = (r.confidence || '').toUpperCase();
@@ -201,23 +204,64 @@ function backupEmbed(slot, n) {
   };
 }
 
-async function post(embed) {
-  const body = { username: 'FUNDAMENTALS', embeds: [embed] };
+async function post(embed, webhook = process.env.DISCORD_WEBHOOK, username = 'FUNDAMENTALS') {
+  const body = { username, embeds: [embed] };
   if (process.env.DRY === '1') { console.log(JSON.stringify(body, null, 2)); return; }
-  if (!process.env.DISCORD_WEBHOOK) throw new Error('DISCORD_WEBHOOK not set');
-  const r = await fetch(process.env.DISCORD_WEBHOOK, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(TIMEOUT.discord) });
+  if (!webhook) throw new Error('webhook not set');
+  const r = await fetch(webhook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(TIMEOUT.discord) });
   if (!r.ok) throw new Error(`Discord ${r.status} ${await r.text()}`);
-  console.log('posted to Discord');
+  console.log(username === 'FUNDAMENTALS' ? 'posted to Discord' : 'health message sent');
+}
+
+// ---- watchdog: instant alerts + nightly summary to a private #bot-health channel (secret HEALTH_WEBHOOK; optional) ----
+const status = { model: '', problems: [] };
+async function alert(text, color = 0xf85149) {
+  if (!process.env.HEALTH_WEBHOOK && process.env.DRY !== '1') return;
+  try { await post({ description: cut(text, 4000), color, timestamp: new Date().toISOString() }, process.env.HEALTH_WEBHOOK, 'BOT HEALTH'); } catch (e) { console.log('health alert failed: ' + e.message); }
+}
+// reads today's GitHub runs (built-in GITHUB_TOKEN, read-only) and their logs, one line per report
+async function healthCheck(uk) {
+  const repo = process.env.GITHUB_REPOSITORY, gh = { Authorization: `Bearer ${process.env.GITHUB_TOKEN}`, Accept: 'application/vnd.github+json', 'User-Agent': 'fundamentals-bot' };
+  const api = async p => { const r = await fetch('https://api.github.com/repos/' + repo + p, { headers: gh, signal: AbortSignal.timeout(TIMEOUT.feed) }); if (!r.ok) throw new Error(`GitHub ${r.status} ${p}`); return r; };
+  const runs = (await (await api(`/actions/runs?created=%3E%3D${uk.date}&per_page=100`)).json()).workflow_runs || [];
+  const seen = {}, lines = [];
+  for (const run of runs.sort((a, b) => a.created_at.localeCompare(b.created_at))) {
+    if (run.id === +process.env.GITHUB_RUN_ID) continue;
+    const jobs = (await (await api(`/actions/runs/${run.id}/jobs`)).json()).jobs || [];
+    let log = ''; try { if (jobs[0]) log = await (await api(`/actions/jobs/${jobs[0].id}/logs`)).text(); } catch { }
+    const slot = (log.match(/report: (\w+)/) || [])[1];
+    if (!slot && /no report due/.test(log)) continue;                       // the other season's timer
+    const t = ukParts(new Date(run.updated_at)), at = `${t.hour}:${t.minute}`, late = Math.round((Date.parse(run.run_started_at) - Date.parse(run.created_at)) / 60e3);
+    const manual = run.event === 'workflow_dispatch' ? ' (manual test)' : '';
+    const model = (log.match(/model used: ([^\r\n]+)/) || [])[1];
+    let line;
+    if (run.conclusion !== 'success') line = `❌ **${slot || '?'}**${manual} ${at}: run ${run.conclusion || run.status}`;
+    else if (/skipped/.test(log)) line = `⏭️ **${slot}**${manual} ${at}: skipped - ${(log.match(/(no [^\r\n]*?) - skipped|(nothing to report[^\r\n]*)/) || [])[1] || 'nothing to report'}`;
+    else if (/AI report failed/.test(log)) line = `⚠️ **${slot}**${manual} ${at}: basic report only - ${(log.match(/AI report failed: ([^\r\n]+)/) || [])[1]}`;
+    else if (/posted to Discord/.test(log)) line = `✅ **${slot}**${manual} ${at}${model ? ' · ' + model.replace(' (no web search)', '') : ''}`;
+    else line = `❓ **${slot || '?'}**${manual} ${at}: finished but nothing posted`;
+    if (late >= 15) line += ` · started ${late} min late`;
+    lines.push(line); if (slot && !manual) seen[slot] = true;
+  }
+  const nowMin = +uk.time.slice(0, 2) * 60 + +uk.time.slice(3, 5);
+  const missing = REPORT_SLOTS.filter(s => !seen[s] && (+SLOTS[s].uk.slice(0, 2) * 60 + +SLOTS[s].uk.slice(3, 5)) + 30 < nowMin);
+  for (const s of missing) lines.push(`❓ **${s}** (${SLOTS[s].uk}): no run found - GitHub didn't start it`);
+  const bad = lines.filter(l => /^(❌|⚠️|❓)/.test(l)).length;
+  await alert(`**🩺 BOT HEALTH · ${uk.weekday} ${uk.date}** - ${bad ? bad + ' problem(s)' : 'all good'}\n\n${lines.join('\n') || 'no runs today'}`, bad ? 0xf85149 : 0x3fb950);
 }
 
 (async () => {
   const uk = ukNow();
   const slot = pickSlot(uk);
   if (!slot || !SLOTS[slot]) { console.log(`no report due (UK ${uk.time}, cron "${process.env.CRON || ''}") - other season's timer, exiting`); return; }
+  if (slot === 'health') { await healthCheck(uk); return; }
+  status.slot = slot;
   console.log(`report: ${slot} · UK ${uk.weekday} ${uk.date} ${uk.time}`);
   const t0 = Date.now();
   // morning: earnings for the rest of the week; earnings report: today only
-  const weekDates = []; for (let k = 0, d = uk.date; k < 7 && weekDates.length < 5; k++, d = addDays(uk.date, k)) { const w = new Date(d + 'T12:00:00Z').getUTCDay(); if (w >= 1 && w <= 5) weekDates.push(d); if (w === 5) break; }
+  // (on Fridays: today + all of next week)
+  const isFri = new Date(uk.date + 'T12:00:00Z').getUTCDay() === 5;
+  const weekDates = []; for (let k = 0; k < (isFri ? 8 : 5); k++) { const d = addDays(uk.date, k), w = new Date(d + 'T12:00:00Z').getUTCDay(); if (w >= 1 && w <= 5) weekDates.push(d); if (w === 5 && !isFri) break; }
   const [n, news, cal, earn] = await Promise.all([marketNumbers(), headlines(), calendar(uk.date),
     slot === 'morning' ? earnings(weekDates) : slot === 'earnings' ? earnings([uk.date]) : Promise.resolve([])]);
   const today = cal || [];
@@ -255,8 +299,10 @@ async function post(embed) {
     embed = buildEmbed(slot, r, n, extra);
   } catch (e) {
     console.log('AI report failed: ' + e.message);
+    await alert(`⚠️ **${slot}** ${uk.time} UK: the AI report failed (${cut(e.message, 300)}).\n${['morning', 'midday', 'preny'].includes(slot) ? 'A basic report was posted instead.' : 'Nothing was posted for this result report.'}`);
     if (!['morning', 'midday', 'preny'].includes(slot)) return;
     embed = backupEmbed(slot, n);
   }
+  if (!cal) await alert(`⚠️ **${slot}** ${uk.time} UK: the Nasdaq calendar could not be read - report posted without it.`, 0xf0b232);
   await post(embed);
-})().then(() => process.exit(0), e => { console.error(e); process.exit(1); });
+})().then(() => process.exit(0), async e => { console.error(e); await alert(`❌ **${status.slot || 'bot'}**: crashed - ${cut(e.message, 500)}`); process.exit(1); });

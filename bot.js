@@ -1,19 +1,22 @@
 // FUNDAMENTALS BOT - posts an NQ fundamentals report to Discord.
 // Runs on GitHub Actions (free). Secrets: GEMINI_API_KEY, DISCORD_WEBHOOK.
 // Env: CRON (the schedule that fired, set by the workflow) or SLOT (manual run), DRY=1 prints instead of posting.
-// Each report time has two crons (UK summer / winter time); the one that doesn't match today's UK clock exits quietly.
+// All report times are New York time (ET), so they follow the US market through both clock changes. Each has two crons
+// (US summer / winter time); the one that doesn't match today's New York clock exits quietly. Times shown in reports are UK time.
 const fs = require('fs');
 const path = require('path');
 
 const SLOTS = {
-  morning:  { uk: '07:00', title: '🌅 MORNING BRIEF',        next: '13:00 UK' },
-  midday:   { uk: '13:00', title: '📊 MIDDAY',               next: 'after the 13:30 data, or 14:25 UK' },
-  post1:    { uk: '13:32', title: '⚡ DATA RESULT',          next: '14:25 UK' },
-  preny:    { uk: '14:25', title: '🔔 BEFORE THE NY OPEN',   next: 'after the 15:00 data, or 07:00 UK' },
-  post2:    { uk: '15:02', title: '⚡ DATA RESULT',          next: 'tonight if a big company reports, or 07:00 UK' },
-  earnings: { uk: '21:30', title: '📢 EARNINGS',             next: '07:00 UK' },
-  health:   { uk: '21:50', title: '🩺 BOT HEALTH',           next: '' },   // daily check of today's runs -> #bot-health
+  morning:  { ny: '02:00', title: '🌅 MORNING BRIEF',        next: d => `${slotUk('midday', d)} UK` },
+  midday:   { ny: '08:00', title: '📊 MIDDAY',               next: d => `after any ${nyToUk(d, '08:30')} data, or ${slotUk('preny', d)} UK` },
+  post1:    { ny: '08:32', title: '⚡ DATA RESULT',          next: d => `${slotUk('preny', d)} UK` },
+  preny:    { ny: '09:25', title: '🔔 BEFORE THE NY OPEN',   next: d => `after any ${nyToUk(d, '10:00')} data, or ${slotUk('morning', d)} UK` },
+  post2:    { ny: '10:02', title: '⚡ DATA RESULT',          next: d => `tonight if a big company reports, or ${slotUk('morning', d)} UK` },
+  earnings: { ny: '16:30', title: '📢 EARNINGS',             next: d => `${slotUk('morning', d)} UK` },
+  health:   { ny: '16:50', title: '🩺 BOT HEALTH',           next: () => '' },   // daily check of today's runs -> #bot-health
 };
+const slotUk = (name, d) => name === 'morning' ? nyToUk(nextWeekday(d), SLOTS.morning.ny) : nyToUk(d, SLOTS[name].ny);   // a report's UK time (morning = next weekday's)
+const nextWeekday = d => { let x = d; do { x = addDays(x, 1); } while ([0, 6].includes(new Date(x + 'T12:00:00Z').getUTCDay())); return x; };
 const REPORT_SLOTS = ['morning', 'midday', 'post1', 'preny', 'post2', 'earnings'];
 const MODELS = (process.env.MODEL || 'gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite').split(',');
 const FEEDS = [
@@ -39,8 +42,10 @@ function pickSlot(uk) {
   const cron = (process.env.CRON || '').trim().split(/\s+/);
   if (cron.length < 2) return null;
   if (/[*/]/.test(cron[0] + cron[1])) return 'news';                       // the repeating timers are the news checks
-  const hh = String((+cron[1] + uk.offset) % 24).padStart(2, '0'), mm = String(+cron[0]).padStart(2, '0');
-  return Object.keys(SLOTS).find(k => SLOTS[k].uk === `${hh}:${mm}`) || null;
+  // the cron's UTC time today, as New York clock time
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+    .formatToParts(new Date(Date.UTC(+uk.date.slice(0, 4), +uk.date.slice(5, 7) - 1, +uk.date.slice(8, 10), +cron[1], +cron[0]))).map(x => [x.type, x.value]));
+  return Object.keys(SLOTS).find(k => SLOTS[k].ny === `${p.hour}:${p.minute}`) || null;
 }
 
 // free delayed prices (Yahoo). Optional: the report still works without them.
@@ -117,7 +122,7 @@ async function earnings(dates) {
       for (const x of (await getJson('https://api.nasdaq.com/api/calendar/earnings?date=' + d)).data?.rows || [])
         // after a company reports, Nasdaq often changes its time to "not supplied" - treat that as a possible after-close report
         if (BIG.has(x.symbol)) out.push({ date: d, symbol: x.symbol, name: x.name, pre: /pre/.test(x.time),
-          when: /after/.test(x.time) ? 'after the close (~21:00 UK)' : /pre/.test(x.time) ? 'before the open (~12:00-13:00 UK)' : 'time not given',
+          when: /after/.test(x.time) ? `after the close (~${nyToUk(d, '16:05')} UK)` : /pre/.test(x.time) ? `before the open (~${nyToUk(d, '07:00')}-${nyToUk(d, '08:00')} UK)` : 'time not given',
           eps: clean(x.epsForecast), actual: /\d/.test(x.eps || '') ? clean(x.eps) : '', surprise: /\d/.test(x.surprise || '') ? clean(x.surprise) : '' });
     } catch { }
   }));
@@ -132,14 +137,15 @@ function numbersText(n) {
   return out.join('\n') || 'not available';
 }
 
-function slotTask(slot) {
+function slotTask(slot, d) {
+  const u = t => nyToUk(d, t);   // New York time -> UK time today
   switch (slot) {
     case 'morning': return 'MORNING BRIEF before London. Cover overnight news, today\'s US calendar (UK times, with forecasts) and the big NQ earnings this week.';
     case 'midday': return 'MIDDAY UPDATE. What changed since the morning; the next release and what result would flip the bias.';
-    case 'post1': return 'DATA RESULT. If NO high-impact US release came out between 12:25 and 13:35 UK time today, return {"skip": true}. Otherwise report actual vs forecast, the immediate reaction in yields/NQ, and whether the bias changes.';
-    case 'post2': return 'DATA RESULT. If NO high-impact or medium-impact US release came out between 14:40 and 15:05 UK time today, return {"skip": true}. Otherwise report actual vs forecast, the reaction, and whether the bias changes.';
+    case 'post1': return `DATA RESULT. If NO high-impact US release came out between ${u('07:25')} and ${u('08:35')} UK time today, return {"skip": true}. Otherwise report actual vs forecast, the immediate reaction in yields/NQ, and whether the bias changes.`;
+    case 'post2': return `DATA RESULT. If NO high-impact or medium-impact US release came out between ${u('09:40')} and ${u('10:05')} UK time today, return {"skip": true}. Otherwise report actual vs forecast, the reaction, and whether the bias changes.`;
     case 'earnings': return 'EARNINGS RESULT for the big Nasdaq-100 companies that reported after the US close today (listed below with EPS vs expected and the after-hours move). If the headlines and data show none of them has actually reported yet, return {"skip": true}. Otherwise for each: revenue and guidance vs expected if the headlines say, why the stock is moving, what it means for NQ, and the NQ bias for tomorrow. Put the key facts in "result".';
-    case 'preny': return 'BEFORE THE NY OPEN (14:30 UK). Bias for the cash session, what to watch in the first hours, the next release. If big companies reported before the open (listed below), explain their results and pre-market moves in "result".';
+    case 'preny': return `BEFORE THE NY OPEN (${u('09:30')} UK). Bias for the cash session, what to watch in the first hours, the next release. If big companies reported before the open (listed below), explain their results and pre-market moves in "result".`;
   }
 }
 
@@ -207,13 +213,13 @@ function buildEmbed(slot, r, n, extra = {}) {
     title: cut(`${SLOTS[slot].title}${r.headline ? ': ' + r.headline : ''}`, 256),
     description: cut(parts.join('\n\n​\n'), 4000),   // blank line + invisible line = a wider gap between sections (Discord drops plain extra blank lines)
     color: COLOR[bias] ?? COLOR.NEUTRAL,
-    footer: { text: `${DISCLAIMER} · next report ${SLOTS[slot].next} · calendar & earnings: Nasdaq` },
+    footer: { text: `${DISCLAIMER} · next report ${SLOTS[slot].next(extra.today)} · calendar & earnings: Nasdaq` },
     timestamp: new Date().toISOString(),
   };
 }
 
 // backup: numbers + fixed rule, no AI (only for the scheduled briefs, not for result reports)
-function backupEmbed(slot, n) {
+function backupEmbed(slot, n, d) {
   let score = 0, used = 0;
   if (n.nq) { score += Math.sign(n.nq.chg); used++; }
   if (n.tnx) { score -= Math.sign(n.tnx.chg); used++; }
@@ -222,7 +228,7 @@ function backupEmbed(slot, n) {
   return {
     title: `${SLOTS[slot].title} (basic)`,
     description: `__**NQ bias ${bias}**__\n` + numbersText(n) + `\n\nRule: NQ up, yield down and dollar down each count bullish (opposite = bearish). Score ${sgn(score)} of ${used}.\nThe full AI report was not available this time.`,
-    color: COLOR[bias], footer: { text: `${DISCLAIMER} · next report ${SLOTS[slot].next}` }, timestamp: new Date().toISOString(),
+    color: COLOR[bias], footer: { text: `${DISCLAIMER} · next report ${SLOTS[slot].next(d)}` }, timestamp: new Date().toISOString(),
   };
 }
 
@@ -274,7 +280,8 @@ async function newsItems() {
 async function newsCheck(uk) {
   console.log('news check started');
   const day = new Date(uk.date + 'T12:00:00Z').getUTCDay(), hr = +uk.time.slice(0, 2);
-  if (day >= 1 && day <= 5 && (hr < 7 || hr >= 22)) { console.log('news: outside 07-22 UK'); return; }
+  const nyHr = +new Intl.DateTimeFormat('en-GB', { timeZone: 'America/New_York', hour: '2-digit', hourCycle: 'h23' }).format(new Date());
+  if (day >= 1 && day <= 5 && (nyHr < 2 || nyHr >= 18)) { console.log(`news: outside 02:00-18:00 New York time (UK ${hr}h)`); return; }
   let st = { seen: {}, posted: [] };
   try { st = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch { console.log('news: no saved state - first run'); }
   const now = Date.now(), firstRun = !Object.keys(st.seen).length;
@@ -361,8 +368,8 @@ async function healthCheck(uk) {
     lines.push(line); if (slot && !manual) seen[slot] = true;
   }
   const nowMin = +uk.time.slice(0, 2) * 60 + +uk.time.slice(3, 5);
-  const missing = REPORT_SLOTS.filter(s => !seen[s] && (+SLOTS[s].uk.slice(0, 2) * 60 + +SLOTS[s].uk.slice(3, 5)) + 30 < nowMin);
-  for (const s of missing) lines.push(`❓ **${s}** (${SLOTS[s].uk}): no run found - GitHub didn't start it`);
+  const missing = REPORT_SLOTS.filter(s => { const t = slotUk(s, uk.date); return !seen[s] && (+t.slice(0, 2) * 60 + +t.slice(3, 5)) + 30 < nowMin; });
+  for (const s of missing) lines.push(`❓ **${s}** (${slotUk(s, uk.date)} UK): no run found - GitHub didn't start it`);
   if (news.runs) lines.push(`${news.failed ? '⚠️' : '📰'} **news**: ${news.runs} checks, ${news.posted} posted${news.scores.length ? ' (scores ' + news.scores.join(', ') + ')' : ''}${news.failed ? `, ${news.failed} failed` : ''}`);
   const bad = lines.filter(l => /^(❌|⚠️|❓)/.test(l) && !/manual test/.test(l)).length;
   if (runs.length >= 100) lines.push('(only the first 100 runs of the day were checked)');   // manual tests don't count as problems
@@ -391,7 +398,8 @@ async function healthCheck(uk) {
   const extra = { today: uk.date };
   // result reports only run when something actually came out / reported - otherwise skip without using the AI
   if (slot === 'post1' || slot === 'post2') {
-    const [a, b] = slot === 'post1' ? [toMin('12:25'), toMin('13:35')] : [toMin('14:40'), toMin('15:05')];
+    const w = t => toMin(nyToUk(uk.date, t));   // windows in New York time, compared in UK time
+    const [a, b] = slot === 'post1' ? [w('07:25'), w('08:35')] : [w('09:40'), w('10:05')];
     let due = today.filter(e => toMin(e.time) >= a && toMin(e.time) <= b);
     if (cal && !due.length) { console.log('no US release in this window today - skipped'); return; }
     // Nasdaq can take a few minutes to fill in the actual numbers - wait (up to 5 min) until they're all in
@@ -422,7 +430,7 @@ async function healthCheck(uk) {
   if (!cal) delete extra.calendar;
 
   const system = fs.readFileSync(path.join(__dirname, 'prompt.md'), 'utf8');
-  const user = `Today is ${uk.weekday} ${uk.date}, UK time now ${uk.time}.\nReport type: ${slotTask(slot)}\n\n` +
+  const user = `Today is ${uk.weekday} ${uk.date}, UK time now ${uk.time}.\nReport type: ${slotTask(slot, uk.date)}\n\n` +
     `Latest prices (delayed, from a free feed; use these numbers):\n${numbersText(n)}\n\n` +
     `US economic calendar today (UK time; "actual" = already released):\n${cal ? (calendarLines(today).join('\n').replace(/\*\*/g, '') || 'nothing medium/high today') : 'not available'}\n\n` +
     (extra.results?.length ? `Earnings results today (from data feeds):\n${resultLines(extra.results, extra.resultsPre).join('\n').replace(/\*\*/g, '')}\n\n`
@@ -438,7 +446,7 @@ async function healthCheck(uk) {
     console.log('AI report failed: ' + e.message);
     await alert(`⚠️ **${slot}** ${uk.time} UK: the AI report failed (${cut(e.message, 300)}).\n${['morning', 'midday', 'preny'].includes(slot) ? 'A basic report was posted instead.' : 'Nothing was posted for this result report.'}`);
     if (!['morning', 'midday', 'preny'].includes(slot)) return;
-    embed = backupEmbed(slot, n);
+    embed = backupEmbed(slot, n, uk.date);
   }
   if (!cal) await alert(`⚠️ **${slot}** ${uk.time} UK: the Nasdaq calendar could not be read - report posted without it.`, 0xf0b232);
   await post(embed);

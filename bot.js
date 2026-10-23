@@ -257,21 +257,29 @@ const NEWS_FEEDS = [
 ];
 // only established outlets (Google News also returns blogs and small local sites)
 const TRUSTED = /^(Reuters|Bloomberg|CNBC|The Wall Street Journal|WSJ|Financial Times|FT|Associated Press|AP News|AFP|Yahoo Finance|MarketWatch|Barron's|Axios|Politico|BBC|CNN|The New York Times|The Washington Post|The Guardian|Al Jazeera|Nikkei Asia|South China Morning Post|Fox Business|Investing\.com|FXStreet|Kitco|Business Insider|Fortune|The Hill|NBC News|ABC News|CBS News|The Times of Israel|Semafor|Forbes|The Economist|Bloomberg\.com|Reuters\.com|Seeking Alpha|TheStreet|Benzinga|Investopedia|ForexLive|Bloomberg Law|The Telegraph|Sky News|Kyiv Independent|Haaretz)\b/i;
+// ---- crypto news desk -> #crypto-news (secret CRYPTO_WEBHOOK), same checks, own feeds / scale / memory ----
+const CRYPTO_FEEDS = [
+  'https://www.coindesk.com/arc/outboundfeeds/rss/', 'https://cointelegraph.com/rss', 'https://www.theblock.co/rss.xml', 'https://decrypt.co/feed',
+  ...['bitcoin OR BTC', 'ethereum OR ether', 'crypto SEC OR CFTC OR regulation OR stablecoin', 'crypto ETF inflows OR outflows',
+    'crypto hack OR exploit OR liquidations', 'Binance OR Coinbase OR Tether OR MicroStrategy OR Strategy bitcoin'].map(q => `https://news.google.com/rss/search?q=${encodeURIComponent(q)}+when:2h&hl=en-US&gl=US&ceid=US:en`),
+];
+const CRYPTO_TRUSTED = /^(CoinDesk|Cointelegraph|The Block|Decrypt|Blockworks|DL News|The Defiant|Bitcoin Magazine|CryptoSlate|Unchained|Reuters|Bloomberg|CNBC|Yahoo Finance|The Wall Street Journal|WSJ|Financial Times|Fortune|Forbes|Barron's|Axios|Business Insider|MarketWatch|Associated Press|AP News|Investing\.com|Benzinga|Bloomberg\.com|Reuters\.com|Coinbase|Kitco)\b/i;
+const CRYPTO_STATE = path.join(__dirname, 'crypto_state.json');
 const STATE_FILE = path.join(__dirname, 'news_state.json');
 const REPORT_STATE = path.join(__dirname, 'report_state.json');   // last report's bias + "what would change it", checked by the next report
 const hash = s => { let h = 0; for (const c of s.toLowerCase().replace(/[^a-z0-9]/g, '')) h = (h * 31 + c.charCodeAt(0)) | 0; return h.toString(36); };
-async function newsItems() {
-  const unesc = s => s.replace(/<!\[CDATA\[|\]\]>/g, '').replace(/&amp;/g, '&').replace(/&apos;|&#39;|&#x2019;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
+async function newsItems(feeds, trusted) {
+  const unesc = s => s.replace(/<!\[CDATA\[|\]\]>/g, '').replace(/&amp;/g, '&').replace(/&apos;|&#39;|&#x2019;|&#8217;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
   const out = new Map();
-  await Promise.all(NEWS_FEEDS.map(async u => {
+  await Promise.all(feeds.map(async u => {
     try {
       const t = await (await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(TIMEOUT.feed) })).text();
       for (const m of t.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
         const g = k => unesc((m[1].match(new RegExp(`<${k}[^>]*>([\\s\\S]*?)<\\/${k}>`)) || [])[1] || '');
         const title = g('title'), when = Date.parse(g('pubDate'));
         if (!title || !(when > 0)) continue;
-        const src = g('source') || (u.includes('cnbc') ? 'CNBC' : u.includes('yahoo') ? 'Yahoo Finance' : '');
-        if (!TRUSTED.test(src)) continue;
+        const src = g('source') || [['cnbc', 'CNBC'], ['yahoo', 'Yahoo Finance'], ['coindesk', 'CoinDesk'], ['cointelegraph', 'Cointelegraph'], ['theblock', 'The Block'], ['decrypt', 'Decrypt']].find(([k]) => u.includes(k))?.[1] || '';
+        if (!trusted.test(src)) continue;
         const clean = title.replace(/\s+-\s+[^-]{2,40}$/, '');           // Google News adds " - Source" to titles
         out.set(hash(clean), { id: hash(clean), title: clean, src, link: g('link'), when });
       }
@@ -279,22 +287,12 @@ async function newsItems() {
   }));
   return [...out.values()];
 }
-async function newsCheck(uk) {
-  console.log('news check started');
-  const day = new Date(uk.date + 'T12:00:00Z').getUTCDay(), hr = +uk.time.slice(0, 2);
-  const nyHr = +new Intl.DateTimeFormat('en-GB', { timeZone: 'America/New_York', hour: '2-digit', hourCycle: 'h23' }).format(new Date());
-  if (day >= 1 && day <= 5 && (nyHr < 2 || nyHr >= 18)) { console.log(`news: outside 02:00-18:00 New York time (UK ${hr}h)`); return; }
-  let st = { seen: {}, posted: [] };
-  try { st = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch { console.log('news: no saved state - first run'); }
-  const now = Date.now(), firstRun = !Object.keys(st.seen).length;
-  const allNew = (await newsItems()).filter(x => !st.seen[x.id] && now - x.when < (firstRun ? 45 : 180) * 60e3).sort((a, b) => b.when - a.when);
-  for (const x of allNew) st.seen[x.id] = x.when;                                   // everything fetched counts as seen
-  const fresh = allNew.slice(0, 60);
-  console.log(`news: ${allNew.length} new headlines${allNew.length > 60 ? ' (newest 60 checked)' : ''}`);
-  for (const k in st.seen) if (now - st.seen[k] > 2 * 864e5) delete st.seen[k];      // remember 2 days
-  st.posted = (st.posted || []).filter(p => now - p.t < 864e5);
-  if (fresh.length) {
-    const system = `You are a markets news editor for NQ (Nasdaq-100 futures) day traders. You score headlines for how much they can move US stock index futures, oil, gold, the dollar and yields.
+// the two news desks: what to read, how to score it, where to post
+const DESKS = {
+  news: {
+    label: 'news', feeds: NEWS_FEEDS, trusted: TRUSTED, state: STATE_FILE, webhook: 'NEWS_WEBHOOK', username: 'BREAKING NEWS', tag6: '📰 MARKET NEWS',
+    dir: { RISK_ON: 'Risk-ON for NQ', RISK_OFF: 'Risk-OFF for NQ' },
+    system: `You are a markets news editor for NQ (Nasdaq-100 futures) day traders. You score headlines for how much they can move US stock index futures, oil, gold, the dollar and yields.
 Impact scale (be strict and consistent):
 10 = market-shaking: war between major powers, emergency Fed move, major bank collapse.
 9 = major shock: big military escalation hitting oil supply, sudden large tariffs on China/EU, Fed chair resigns.
@@ -303,16 +301,53 @@ Impact scale (be strict and consistent):
 6 = relevant but small or brief: second-tier data surprises, regional Fed speakers, big non-mega-cap company news, diplomatic talks/warnings, 2-3% oil moves, sharp moves in Asian markets.
 5 or less = normal news flow: ignore.
 Rules: group headlines about the same event into one story. Skip stories already posted (listed). Skip opinion pieces, "what to watch" previews, explainers and market wrap-ups that only describe moves. Never invent facts beyond the headlines. Plain simple English, bullets under 20 words. Never say buy/sell.
-Answer with ONE JSON object only: {"stories":[{"ids":["headline ids"],"score":6-10,"headline":"short clear headline","direction":"RISK_ON"|"RISK_OFF"|"UNCLEAR","why":["1-2 bullets: why it matters for NQ"],"moves":{"NQ":"up|down|flat","Oil":"up|down|flat","Gold":"up|down|flat","Dollar":"up|down|flat","Yields":"up|down|flat"}}]} - only stories scoring ${NEWS_MIN} or more; {"stories":[]} if none.`;
+Answer with ONE JSON object only: {"stories":[{"ids":["headline ids"],"score":6-10,"headline":"short clear headline","direction":"RISK_ON"|"RISK_OFF"|"UNCLEAR","why":["1-2 bullets: why it matters for NQ"],"moves":{"NQ":"up|down|flat","Oil":"up|down|flat","Gold":"up|down|flat","Dollar":"up|down|flat","Yields":"up|down|flat"}}]} - only stories scoring ${NEWS_MIN} or more; {"stories":[]} if none.`,
+  },
+  crypto: {
+    label: 'crypto', feeds: CRYPTO_FEEDS, trusted: CRYPTO_TRUSTED, state: CRYPTO_STATE, webhook: 'CRYPTO_WEBHOOK', username: 'CRYPTO NEWS', tag6: '🪙 CRYPTO NEWS',
+    dir: { RISK_ON: 'Bullish for crypto', RISK_OFF: 'Bearish for crypto' },
+    system: `You are a crypto news editor for Bitcoin and Ethereum traders. You score headlines for how much they can move BTC, ETH and the wider crypto market.
+Impact scale (be strict and consistent):
+10 = market-shaking: a top exchange or stablecoin collapses, Bitcoin ETFs banned/forced to close, a G7 country adopts or bans Bitcoin.
+9 = major shock: hack/exploit over $500m, SEC/DOJ action against Binance/Coinbase/Tether-size firm, major stablecoin loses its peg, $2bn+ liquidations.
+8 = clearly moves BTC/ETH: new ETF approval or rejection, record ETF inflows/outflows, major law or regulation passed, big government/treasury buying or selling, surprise Fed move hitting crypto.
+7 = notable: large ETF flows, a big company buying BTC, exploit $50-500m, important court ruling, big exchange listing/delisting, major network upgrade dates.
+6 = relevant but small or brief: smaller exploits, regulator comments, big altcoin news (SOL/XRP etc.), notable whale moves, sharp sector moves.
+5 or less = normal news flow, price commentary, sponsored or promotional pieces: ignore.
+Rules: group headlines about the same event into one story. Skip stories already posted (listed). Skip opinion pieces, price predictions, "what to watch" previews, explainers and market wrap-ups that only describe moves. Never invent facts beyond the headlines. Plain simple English, bullets under 20 words. Never say buy/sell.
+Answer with ONE JSON object only: {"stories":[{"ids":["headline ids"],"score":6-10,"headline":"short clear headline","direction":"RISK_ON"|"RISK_OFF"|"UNCLEAR","why":["1-2 bullets: why it matters for crypto"],"moves":{"BTC":"up|down|flat","ETH":"up|down|flat","Alts":"up|down|flat"}}]} (RISK_ON = bullish for crypto, RISK_OFF = bearish) - only stories scoring ${NEWS_MIN} or more; {"stories":[]} if none.`,
+  },
+};
+async function newsCheck(uk) {
+  console.log('news check started');
+  const day = new Date(uk.date + 'T12:00:00Z').getUTCDay(), hr = +uk.time.slice(0, 2);
+  const nyHr = +new Intl.DateTimeFormat('en-GB', { timeZone: 'America/New_York', hour: '2-digit', hourCycle: 'h23' }).format(new Date());
+  if (day >= 1 && day <= 5 && (nyHr < 2 || nyHr >= 18)) { console.log(`news: outside 02:00-18:00 New York time (UK ${hr}h)`); return; }
+  for (const desk of Object.values(DESKS)) {
+    if (!process.env[desk.webhook] && process.env.DRY !== '1') { console.log(`${desk.label}: no ${desk.webhook} secret - skipped`); continue; }
+    await newsDesk(uk, desk);
+  }
+}
+async function newsDesk(uk, desk) {
+  let st = { seen: {}, posted: [] };
+  try { st = JSON.parse(fs.readFileSync(desk.state, 'utf8')); } catch { console.log(`${desk.label}: no saved state - first run`); }
+  const now = Date.now(), firstRun = !Object.keys(st.seen).length;
+  const allNew = (await newsItems(desk.feeds, desk.trusted)).filter(x => !st.seen[x.id] && now - x.when < (firstRun ? 45 : 180) * 60e3).sort((a, b) => b.when - a.when);
+  for (const x of allNew) st.seen[x.id] = x.when;                                   // everything fetched counts as seen
+  const fresh = allNew.slice(0, 60);
+  console.log(`${desk.label}: ${allNew.length} new headlines${allNew.length > 60 ? ' (newest 60 checked)' : ''}`);
+  for (const k in st.seen) if (now - st.seen[k] > 2 * 864e5) delete st.seen[k];      // remember 2 days
+  st.posted = (st.posted || []).filter(p => now - p.t < 864e5);
+  if (fresh.length) {
     const user = `UK time now ${uk.weekday} ${uk.date} ${uk.time}.\n\nAlready posted in the last 24 h (do not repeat):\n${st.posted.map(p => '- ' + p.h).join('\n') || 'none'}\n\nNew headlines:\n${fresh.map(x => `[${x.id}] ${x.title}${x.src ? ' (' + x.src + ')' : ''}`).join('\n')}`;
     let res;
-    try { res = parseJson(await callGemini(system, user, false)); }
-    catch (e) { console.log('news AI failed: ' + e.message); await alert(`⚠️ **news** ${uk.time} UK: the AI check failed (${cut(e.message, 200)}) - ${fresh.length} headlines not checked.`); for (const x of fresh) delete st.seen[x.id]; res = { stories: [] }; }
+    try { res = parseJson(await callGemini(desk.system, user, false)); }
+    catch (e) { console.log(`${desk.label} AI failed: ` + e.message); await alert(`⚠️ **${desk.label}** ${uk.time} UK: the AI check failed (${cut(e.message, 200)}) - ${fresh.length} headlines not checked.`); for (const x of fresh) delete st.seen[x.id]; res = { stories: [] }; }
     const arrow = v => v === 'up' ? '🟢' : v === 'down' ? '🔴' : '⚪';
     for (const s of (res.stories || []).filter(s => s.score >= NEWS_MIN).sort((a, b) => b.score - a.score).slice(0, 5)) {
       const src = fresh.filter(x => (s.ids || []).map(String).includes(x.id)).sort((a, b) => a.when - b.when)[0] || {};
-      const tag = s.score >= 8 ? '🚨 BREAKING' : s.score >= 7 ? '⚠️ NEWS' : '📰 MARKET NEWS';
-      const dir = s.direction === 'RISK_OFF' ? 'Risk-OFF for NQ' : s.direction === 'RISK_ON' ? 'Risk-ON for NQ' : 'Direction unclear';
+      const tag = s.score >= 8 ? '🚨 BREAKING' : s.score >= 7 ? '⚠️ NEWS' : desk.tag6;
+      const dir = desk.dir[s.direction] || 'Direction unclear';
       const t = src.when ? ukParts(new Date(src.when)) : null;
       const moves = Object.entries(s.moves || {}).map(([k, v]) => `${k} ${arrow(v)}`).join(' · ');
       await post({
@@ -320,12 +355,12 @@ Answer with ONE JSON object only: {"stories":[{"ids":["headline ids"],"score":6-
         description: cut(`**${s.headline}**\n\n​\n__**${dir}**__\n${(s.why || []).map(x => '• ' + x).join('\n\n')}${moves ? `\n\n​\n**Likely moves:** ${moves}` : ''}`, 4000),   // ​ line = wider gap
         color: s.direction === 'RISK_OFF' ? COLOR.BEARISH : s.direction === 'RISK_ON' ? COLOR.BULLISH : COLOR.NEUTRAL,
         footer: { text: `${src.src ? 'Source: ' + src.src + ' · ' : ''}${t ? t.hour + ':' + t.minute + ' UK · ' : ''}${DISCLAIMER}` }, timestamp: new Date().toISOString(),
-      }, process.env.NEWS_WEBHOOK, 'BREAKING NEWS');
+      }, process.env[desk.webhook], desk.username);
       st.posted.push({ t: now, h: s.headline });
-      console.log(`news posted: ${s.score}/10 ${s.headline}`);
+      console.log(`${desk.label} posted: ${s.score}/10 ${s.headline}`);
     }
   }
-  fs.writeFileSync(STATE_FILE, JSON.stringify(st));
+  fs.writeFileSync(desk.state, JSON.stringify(st));
 }
 
 // ---- watchdog: instant alerts + nightly summary to a private #bot-health channel (secret HEALTH_WEBHOOK; optional) ----
@@ -339,7 +374,7 @@ async function healthCheck(uk) {
   const repo = process.env.GITHUB_REPOSITORY, gh = { Authorization: `Bearer ${process.env.GITHUB_TOKEN}`, Accept: 'application/vnd.github+json', 'User-Agent': 'fundamentals-bot' };
   const api = async p => { const r = await fetch('https://api.github.com/repos/' + repo + p, { headers: gh, signal: AbortSignal.timeout(TIMEOUT.feed) }); if (!r.ok) throw new Error(`GitHub ${r.status} ${p}`); return r; };
   const runs = (await (await api(`/actions/runs?created=%3E%3D${uk.date}&per_page=100`)).json()).workflow_runs || [];
-  const seen = {}, lines = [], news = { runs: 0, posted: 0, failed: 0, scores: [] };
+  const seen = {}, lines = [], news = { runs: 0, posted: 0, failed: 0, scores: [] }, crypto = { posted: 0, failed: 0, scores: [] };
   for (const run of runs.sort((a, b) => a.created_at.localeCompare(b.created_at))) {
     if (run.id === +process.env.GITHUB_RUN_ID) continue;
     const jobs = (await (await api(`/actions/runs/${run.id}/jobs`)).json()).jobs || [];
@@ -348,6 +383,8 @@ async function healthCheck(uk) {
       news.runs++;
       if (run.conclusion !== 'success' || /news AI failed/.test(log)) news.failed++;
       for (const m of log.matchAll(/news posted: (\d+)\/10/g)) { news.posted++; news.scores.push(+m[1]); }
+      for (const m of log.matchAll(/crypto posted: (\d+)\/10/g)) { crypto.posted++; crypto.scores.push(+m[1]); }
+      if (/crypto AI failed/.test(log)) crypto.failed++;
       continue;
     }
     if (/health check started/.test(log) || (run.status !== 'completed' && !log)) {  // other health checks, or a run still going
@@ -373,6 +410,7 @@ async function healthCheck(uk) {
   const missing = REPORT_SLOTS.filter(s => { const t = slotUk(s, uk.date); return !seen[s] && (+t.slice(0, 2) * 60 + +t.slice(3, 5)) + 30 < nowMin; });
   for (const s of missing) lines.push(`❓ **${s}** (${slotUk(s, uk.date)} UK): no run found - GitHub didn't start it`);
   if (news.runs) lines.push(`${news.failed ? '⚠️' : '📰'} **news**: ${news.runs} checks, ${news.posted} posted${news.scores.length ? ' (scores ' + news.scores.join(', ') + ')' : ''}${news.failed ? `, ${news.failed} failed` : ''}`);
+  if (news.runs) lines.push(`${crypto.failed ? '⚠️' : '🪙'} **crypto news**: ${crypto.posted} posted${crypto.scores.length ? ' (scores ' + crypto.scores.join(', ') + ')' : ''}${crypto.failed ? `, ${crypto.failed} checks failed` : ''}`);
   const bad = lines.filter(l => /^(❌|⚠️|❓)/.test(l) && !/manual test/.test(l)).length;
   if (runs.length >= 100) lines.push('(only the first 100 runs of the day were checked)');   // manual tests don't count as problems
   await alert(`**🩺 BOT HEALTH · ${uk.weekday} ${uk.date}** - ${bad ? bad + ' problem(s)' : 'all good'}\n\n${lines.join('\n') || 'no runs today'}`, bad ? 0xf85149 : 0x3fb950);
@@ -382,9 +420,9 @@ async function healthCheck(uk) {
   const uk = ukNow();
   const slot = pickSlot(uk);
   if (!slot || (!SLOTS[slot] && slot !== 'news')) { console.log(`no report due (UK ${uk.time}, cron "${process.env.CRON || ''}") - other season's timer, exiting`); return; }
-  if (slot === 'health') { for (const f of [STATE_FILE, REPORT_STATE]) try { fs.unlinkSync(f); } catch { } console.log('health check started'); await healthCheck(uk); return; }
+  if (slot === 'health') { for (const f of [STATE_FILE, CRYPTO_STATE, REPORT_STATE]) try { fs.unlinkSync(f); } catch { } console.log('health check started'); await healthCheck(uk); return; }
   // each kind of run only saves its own state file (the other is deleted so the cache step skips it - avoids overwriting newer state)
-  try { fs.unlinkSync(slot === 'news' ? REPORT_STATE : STATE_FILE); } catch { }
+  for (const f of slot === 'news' ? [REPORT_STATE] : [STATE_FILE, CRYPTO_STATE]) try { fs.unlinkSync(f); } catch { }
   if (slot === 'news') { status.slot = 'news'; await newsCheck(uk); return; }
   status.slot = slot;
   console.log(`report: ${slot} · UK ${uk.weekday} ${uk.date} ${uk.time}`);

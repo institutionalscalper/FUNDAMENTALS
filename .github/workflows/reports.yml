@@ -45,7 +45,9 @@ jobs:
       # the news check remembers which headlines it has already seen (news_state.json), kept between runs here
       - uses: actions/cache/restore@v4
         with:
-          path: news_state.json
+          path: |
+            news_state.json
+            crypto_state.json
           key: news-state-${{ github.run_id }}
           restore-keys: news-state-
       # the reports remember the last report's "what would change it" points (report_state.json)
@@ -57,6 +59,7 @@ jobs:
       - run: node bot.js
         env:
           NEWS_WEBHOOK: ${{ secrets.NEWS_WEBHOOK }}
+          CRYPTO_WEBHOOK: ${{ secrets.CRYPTO_WEBHOOK }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           HEALTH_WEBHOOK: ${{ secrets.HEALTH_WEBHOOK }}
@@ -64,9 +67,11 @@ jobs:
           CRON: ${{ github.event.schedule }}
           SLOT: ${{ github.event.inputs.slot }}
       - uses: actions/cache/save@v4
-        if: always() && hashFiles('news_state.json') != ''
+        if: always() && hashFiles('news_state.json', 'crypto_state.json') != ''
         with:
-          path: news_state.json
+          path: |
+            news_state.json
+            crypto_state.json
           key: news-state-${{ github.run_id }}
       - uses: actions/cache/save@v4
         if: always() && hashFiles('report_state.json') != ''

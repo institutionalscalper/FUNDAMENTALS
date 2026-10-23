@@ -202,6 +202,7 @@ function buildEmbed(slot, r, n, extra = {}) {
   // bias on its own underlined line (Discord titles can't be underlined); the numbers sit right under it
   parts.push(`__**NQ bias ${bias}${conf ? ' · confidence ' + conf : ''}**__` + (nums.length && slot !== 'earnings' ? '\n' + nums.join(' · ') : ''));
   if (r.result?.length) parts.push('**RESULT**\n' + r.result.map(x => '• ' + x).join('\n'));
+  if (r.scenarios?.length && extra.prevTitle) parts.push(`**🎯 CHECKING THE ${extra.prevTitle.toUpperCase()} SCENARIOS**\n` + r.scenarios.join('\n'));
   if (r.why?.length) parts.push('**WHY**\n' + r.why.map(x => '• ' + x).join('\n'));
   if (extra.calendar) parts.push(`**${extra.calendarTitle}**\n` + (extra.calendar.length ? calendarLines(extra.calendar).join('\n') : 'No medium or high impact US data.'));
   if (extra.earnings?.length) parts.push('**📅 EARNINGS (big NQ companies)**\n' + earningsLines(extra.earnings, extra.today).join('\n'));
@@ -257,6 +258,7 @@ const NEWS_FEEDS = [
 // only established outlets (Google News also returns blogs and small local sites)
 const TRUSTED = /^(Reuters|Bloomberg|CNBC|The Wall Street Journal|WSJ|Financial Times|FT|Associated Press|AP News|AFP|Yahoo Finance|MarketWatch|Barron's|Axios|Politico|BBC|CNN|The New York Times|The Washington Post|The Guardian|Al Jazeera|Nikkei Asia|South China Morning Post|Fox Business|Investing\.com|FXStreet|Kitco|Business Insider|Fortune|The Hill|NBC News|ABC News|CBS News|The Times of Israel|Semafor|Forbes|The Economist|Bloomberg\.com|Reuters\.com|Seeking Alpha|TheStreet|Benzinga|Investopedia|ForexLive|Bloomberg Law|The Telegraph|Sky News|Kyiv Independent|Haaretz)\b/i;
 const STATE_FILE = path.join(__dirname, 'news_state.json');
+const REPORT_STATE = path.join(__dirname, 'report_state.json');   // last report's bias + "what would change it", checked by the next report
 const hash = s => { let h = 0; for (const c of s.toLowerCase().replace(/[^a-z0-9]/g, '')) h = (h * 31 + c.charCodeAt(0)) | 0; return h.toString(36); };
 async function newsItems() {
   const unesc = s => s.replace(/<!\[CDATA\[|\]\]>/g, '').replace(/&amp;/g, '&').replace(/&apos;|&#39;|&#x2019;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
@@ -380,7 +382,9 @@ async function healthCheck(uk) {
   const uk = ukNow();
   const slot = pickSlot(uk);
   if (!slot || (!SLOTS[slot] && slot !== 'news')) { console.log(`no report due (UK ${uk.time}, cron "${process.env.CRON || ''}") - other season's timer, exiting`); return; }
-  if (slot === 'health') { console.log('health check started'); await healthCheck(uk); return; }
+  if (slot === 'health') { for (const f of [STATE_FILE, REPORT_STATE]) try { fs.unlinkSync(f); } catch { } console.log('health check started'); await healthCheck(uk); return; }
+  // each kind of run only saves its own state file (the other is deleted so the cache step skips it - avoids overwriting newer state)
+  try { fs.unlinkSync(slot === 'news' ? REPORT_STATE : STATE_FILE); } catch { }
   if (slot === 'news') { status.slot = 'news'; await newsCheck(uk); return; }
   status.slot = slot;
   console.log(`report: ${slot} · UK ${uk.weekday} ${uk.date} ${uk.time}`);
@@ -429,8 +433,15 @@ async function healthCheck(uk) {
   if (slot === 'midday' || slot === 'preny') { extra.calendar = today.filter(e => toMin(e.time) > nowMin); extra.calendarTitle = 'STILL TO COME TODAY (UK TIME)'; }
   if (!cal) delete extra.calendar;
 
+  // the previous report today and its "what would change it" scenarios
+  let prev = null;
+  try { prev = JSON.parse(fs.readFileSync(REPORT_STATE, 'utf8')); } catch { }
+  if (!prev || prev.date !== uk.date || prev.slot === slot || !(prev.change || []).length) prev = null;
+  extra.prevTitle = prev && prev.title.replace(/^\S+\s/, '');
   const system = fs.readFileSync(path.join(__dirname, 'prompt.md'), 'utf8');
   const user = `Today is ${uk.weekday} ${uk.date}, UK time now ${uk.time}.\nReport type: ${slotTask(slot, uk.date)}\n\n` +
+    (prev ? `Earlier today the ${extra.prevTitle} (at ${prev.time} UK) had NQ bias ${prev.bias} and said these would change it:\n${prev.change.map(c => '- ' + c).join('\n')}\n` +
+      `In "scenarios", check each one: start with "✅ Happened", "❌ Didn't happen" or "⏳ Not known yet", then the evidence in a few words and what it means for the bias. Your bias now must agree with what happened.\n\n` : '') +
     `Latest prices (delayed, from a free feed; use these numbers):\n${numbersText(n)}\n\n` +
     `US economic calendar today (UK time; "actual" = already released):\n${cal ? (calendarLines(today).join('\n').replace(/\*\*/g, '') || 'nothing medium/high today') : 'not available'}\n\n` +
     (extra.results?.length ? `Earnings results today (from data feeds):\n${resultLines(extra.results, extra.resultsPre).join('\n').replace(/\*\*/g, '')}\n\n`
@@ -442,6 +453,7 @@ async function healthCheck(uk) {
     const r = parseJson(await callGemini(system, user));
     if (r.skip) { console.log('nothing to report for this slot today - skipped'); return; }
     embed = buildEmbed(slot, r, n, extra);
+    if ((r.change || []).length) fs.writeFileSync(REPORT_STATE, JSON.stringify({ date: uk.date, slot, time: uk.time, title: SLOTS[slot].title, bias: (r.bias || 'NEUTRAL').toUpperCase(), change: r.change }));
   } catch (e) {
     console.log('AI report failed: ' + e.message);
     await alert(`⚠️ **${slot}** ${uk.time} UK: the AI report failed (${cut(e.message, 300)}).\n${['morning', 'midday', 'preny'].includes(slot) ? 'A basic report was posted instead.' : 'Nothing was posted for this result report.'}`);

@@ -315,6 +315,7 @@ Impact scale (be strict and consistent):
 6 = relevant but small or brief: second-tier data surprises, regional Fed speakers, big non-mega-cap company news, diplomatic talks/warnings, 2-3% oil moves, sharp moves in Asian markets.
 5 or less = normal news flow: ignore.
 Partial or targeted measures (tariffs removed on SOME goods, one sector, a small partner, done for local politics) score 1-2 lower than the full version, and the headline keeps the limiting word ("some", "certain", "farm goods").
+Follow-ups to a story already posted (same conflict, same oil spike, same tariff fight): post only a genuinely NEW development (a new attack, a new country involved, a new record level) and score it at most 7. Prices mentioned in headlines may be hours old - prefer the newest headline's number and never call an old level the current one.
 Rules: group headlines about the same event into one story. Skip stories already posted (listed). Skip opinion pieces, "what to watch" previews, explainers and market wrap-ups that only describe moves. Never invent facts beyond the headlines. Plain simple English, bullets under 20 words. Never say buy/sell.
 Answer with ONE JSON object only: {"stories":[{"ids":["headline ids"],"score":6-10,"headline":"short clear headline","direction":"RISK_ON"|"RISK_OFF"|"UNCLEAR","why":["1-2 bullets: why it matters for NQ"],"moves":{"NQ":"up|down|flat","Oil":"up|down|flat","Gold":"up|down|flat","Dollar":"up|down|flat","Yields":"up|down|flat"}}]} - only stories scoring ${NEWS_MIN} or more; {"stories":[]} if none.`,
   },

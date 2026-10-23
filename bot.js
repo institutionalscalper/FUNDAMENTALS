@@ -38,6 +38,7 @@ function pickSlot(uk) {
   if (process.env.SLOT) return process.env.SLOT;
   const cron = (process.env.CRON || '').trim().split(/\s+/);
   if (cron.length < 2) return null;
+  if (/[*/]/.test(cron[0] + cron[1])) return 'news';                       // the repeating timers are the news checks
   const hh = String((+cron[1] + uk.offset) % 24).padStart(2, '0'), mm = String(+cron[0]).padStart(2, '0');
   return Object.keys(SLOTS).find(k => SLOTS[k].uk === `${hh}:${mm}`) || null;
 }
@@ -143,11 +144,11 @@ function slotTask(slot) {
 }
 
 // tries each model with Google web search first, then each model without it (the free tier may not allow search)
-async function callGemini(system, user) {
+async function callGemini(system, user, trySearch = true) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error('GEMINI_API_KEY not set');
   let lastErr;
-  for (const search of [true, false]) for (const model of MODELS) {
+  for (const search of trySearch ? [true, false] : [false]) for (const model of MODELS) {
     const tag = `${model}${search ? ' + web search' : ' (no web search)'}`;
     try {
       const body = { systemInstruction: { parts: [{ text: system }] }, generationConfig: { temperature: 0.3 },
@@ -234,6 +235,90 @@ async function post(embed, webhook = process.env.DISCORD_WEBHOOK, username = 'FU
   console.log(username === 'FUNDAMENTALS' ? 'posted to Discord' : 'health message sent');
 }
 
+// ---- breaking news: every 15 min (weekdays 07-22 UK, weekends every 2 h) -> #breaking-news (secret NEWS_WEBHOOK) ----
+// Reads fresh headlines, skips ones already seen (news_state.json, kept between runs by the workflow cache),
+// lets the AI score market impact 1-10 and posts stories scoring NEWS_MIN or more.
+const NEWS_MIN = 6;
+const NEWS_FEEDS = [
+  'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114',   // CNBC top news
+  'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100727362',   // CNBC world
+  'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258',    // CNBC economy
+  'https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5ENDX,NQ%3DF,CL%3DF&region=US&lang=en-US',
+  ...['stock market futures', 'tariffs OR sanctions OR trade war', 'Iran OR Israel OR Russia OR Ukraine OR Taiwan OR missile OR attack',
+    'Federal Reserve OR Powell OR rate cut', 'oil prices OR OPEC', 'Nvidia OR Apple OR Microsoft OR Tesla OR Amazon OR Meta OR Alphabet',
+    'breaking news White House OR Trump announces'].map(q => `https://news.google.com/rss/search?q=${encodeURIComponent(q)}+when:2h&hl=en-US&gl=US&ceid=US:en`),
+];
+// only established outlets (Google News also returns blogs and small local sites)
+const TRUSTED = /^(Reuters|Bloomberg|CNBC|The Wall Street Journal|WSJ|Financial Times|FT|Associated Press|AP News|AFP|Yahoo Finance|MarketWatch|Barron's|Axios|Politico|BBC|CNN|The New York Times|The Washington Post|The Guardian|Al Jazeera|Nikkei Asia|South China Morning Post|Fox Business|Investing\.com|FXStreet|Kitco|Business Insider|Fortune|The Hill|NBC News|ABC News|CBS News|The Times of Israel|Semafor|Forbes|The Economist|Bloomberg\.com|Reuters\.com|Seeking Alpha|TheStreet|Benzinga|Investopedia|ForexLive|Bloomberg Law|The Telegraph|Sky News|Kyiv Independent|Haaretz)\b/i;
+const STATE_FILE = path.join(__dirname, 'news_state.json');
+const hash = s => { let h = 0; for (const c of s.toLowerCase().replace(/[^a-z0-9]/g, '')) h = (h * 31 + c.charCodeAt(0)) | 0; return h.toString(36); };
+async function newsItems() {
+  const unesc = s => s.replace(/<!\[CDATA\[|\]\]>/g, '').replace(/&amp;/g, '&').replace(/&apos;|&#39;|&#x2019;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
+  const out = new Map();
+  await Promise.all(NEWS_FEEDS.map(async u => {
+    try {
+      const t = await (await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(TIMEOUT.feed) })).text();
+      for (const m of t.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
+        const g = k => unesc((m[1].match(new RegExp(`<${k}[^>]*>([\\s\\S]*?)<\\/${k}>`)) || [])[1] || '');
+        const title = g('title'), when = Date.parse(g('pubDate'));
+        if (!title || !(when > 0)) continue;
+        const src = g('source') || (u.includes('cnbc') ? 'CNBC' : u.includes('yahoo') ? 'Yahoo Finance' : '');
+        if (!TRUSTED.test(src)) continue;
+        const clean = title.replace(/\s+-\s+[^-]{2,40}$/, '');           // Google News adds " - Source" to titles
+        out.set(hash(clean), { id: hash(clean), title: clean, src, link: g('link'), when });
+      }
+    } catch { }
+  }));
+  return [...out.values()];
+}
+async function newsCheck(uk) {
+  console.log('news check started');
+  const day = new Date(uk.date + 'T12:00:00Z').getUTCDay(), hr = +uk.time.slice(0, 2);
+  if (day >= 1 && day <= 5 && (hr < 7 || hr >= 22)) { console.log('news: outside 07-22 UK'); return; }
+  let st = { seen: {}, posted: [] };
+  try { st = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch { console.log('news: no saved state - first run'); }
+  const now = Date.now(), firstRun = !Object.keys(st.seen).length;
+  const allNew = (await newsItems()).filter(x => !st.seen[x.id] && now - x.when < (firstRun ? 45 : 180) * 60e3).sort((a, b) => b.when - a.when);
+  for (const x of allNew) st.seen[x.id] = x.when;                                   // everything fetched counts as seen
+  const fresh = allNew.slice(0, 60);
+  console.log(`news: ${allNew.length} new headlines${allNew.length > 60 ? ' (newest 60 checked)' : ''}`);
+  for (const k in st.seen) if (now - st.seen[k] > 2 * 864e5) delete st.seen[k];      // remember 2 days
+  st.posted = (st.posted || []).filter(p => now - p.t < 864e5);
+  if (fresh.length) {
+    const system = `You are a markets news editor for NQ (Nasdaq-100 futures) day traders. You score headlines for how much they can move US stock index futures, oil, gold, the dollar and yields.
+Impact scale (be strict and consistent):
+10 = market-shaking: war between major powers, emergency Fed move, major bank collapse.
+9 = major shock: big military escalation hitting oil supply, sudden large tariffs on China/EU, Fed chair resigns.
+8 = clearly moves NQ: new tariffs or sanctions enacted, ceasefire/peace deal, surprise Fed comments, ban hitting Nvidia/Apple-size company, government shutdown.
+7 = notable: tariff threats, hawkish/dovish Fed speakers, OPEC decisions, China stimulus, big tech antitrust ruling, trade-talk headlines.
+6 = relevant but small or brief: second-tier data surprises, regional Fed speakers, big non-mega-cap company news, diplomatic talks/warnings, 2-3% oil moves, sharp moves in Asian markets.
+5 or less = normal news flow: ignore.
+Rules: group headlines about the same event into one story. Skip stories already posted (listed). Skip opinion pieces, "what to watch" previews, explainers and market wrap-ups that only describe moves. Never invent facts beyond the headlines. Plain simple English, bullets under 20 words. Never say buy/sell.
+Answer with ONE JSON object only: {"stories":[{"ids":["headline ids"],"score":6-10,"headline":"short clear headline","direction":"RISK_ON"|"RISK_OFF"|"UNCLEAR","why":["1-2 bullets: why it matters for NQ"],"moves":{"NQ":"up|down|flat","Oil":"up|down|flat","Gold":"up|down|flat","Dollar":"up|down|flat","Yields":"up|down|flat"}}]} - only stories scoring ${NEWS_MIN} or more; {"stories":[]} if none.`;
+    const user = `UK time now ${uk.weekday} ${uk.date} ${uk.time}.\n\nAlready posted in the last 24 h (do not repeat):\n${st.posted.map(p => '- ' + p.h).join('\n') || 'none'}\n\nNew headlines:\n${fresh.map(x => `[${x.id}] ${x.title}${x.src ? ' (' + x.src + ')' : ''}`).join('\n')}`;
+    let res;
+    try { res = parseJson(await callGemini(system, user, false)); }
+    catch (e) { console.log('news AI failed: ' + e.message); await alert(`⚠️ **news** ${uk.time} UK: the AI check failed (${cut(e.message, 200)}) - ${fresh.length} headlines not checked.`); for (const x of fresh) delete st.seen[x.id]; res = { stories: [] }; }
+    const arrow = v => v === 'up' ? '🟢' : v === 'down' ? '🔴' : '⚪';
+    for (const s of (res.stories || []).filter(s => s.score >= NEWS_MIN).sort((a, b) => b.score - a.score).slice(0, 5)) {
+      const src = fresh.filter(x => (s.ids || []).map(String).includes(x.id)).sort((a, b) => a.when - b.when)[0] || {};
+      const tag = s.score >= 8 ? '🚨 BREAKING' : s.score >= 7 ? '⚠️ NEWS' : '📰 MARKET NEWS';
+      const dir = s.direction === 'RISK_OFF' ? 'Risk-OFF for NQ' : s.direction === 'RISK_ON' ? 'Risk-ON for NQ' : 'Direction unclear';
+      const t = src.when ? ukParts(new Date(src.when)) : null;
+      const moves = Object.entries(s.moves || {}).map(([k, v]) => `${k} ${arrow(v)}`).join(' · ');
+      await post({
+        title: cut(`${tag} · Impact ${s.score}/10`, 256), url: src.link || undefined,
+        description: cut(`**${s.headline}**\n__**${dir}**__\n${(s.why || []).map(x => '• ' + x).join('\n')}${moves ? `\n**Likely moves:** ${moves}` : ''}`, 4000),
+        color: s.direction === 'RISK_OFF' ? COLOR.BEARISH : s.direction === 'RISK_ON' ? COLOR.BULLISH : COLOR.NEUTRAL,
+        footer: { text: `${src.src ? 'Source: ' + src.src + ' · ' : ''}${t ? t.hour + ':' + t.minute + ' UK · ' : ''}${DISCLAIMER}` }, timestamp: new Date().toISOString(),
+      }, process.env.NEWS_WEBHOOK, 'BREAKING NEWS');
+      st.posted.push({ t: now, h: s.headline });
+      console.log(`news posted: ${s.score}/10 ${s.headline}`);
+    }
+  }
+  fs.writeFileSync(STATE_FILE, JSON.stringify(st));
+}
+
 // ---- watchdog: instant alerts + nightly summary to a private #bot-health channel (secret HEALTH_WEBHOOK; optional) ----
 const status = { model: '', problems: [] };
 async function alert(text, color = 0xf85149) {
@@ -245,11 +330,17 @@ async function healthCheck(uk) {
   const repo = process.env.GITHUB_REPOSITORY, gh = { Authorization: `Bearer ${process.env.GITHUB_TOKEN}`, Accept: 'application/vnd.github+json', 'User-Agent': 'fundamentals-bot' };
   const api = async p => { const r = await fetch('https://api.github.com/repos/' + repo + p, { headers: gh, signal: AbortSignal.timeout(TIMEOUT.feed) }); if (!r.ok) throw new Error(`GitHub ${r.status} ${p}`); return r; };
   const runs = (await (await api(`/actions/runs?created=%3E%3D${uk.date}&per_page=100`)).json()).workflow_runs || [];
-  const seen = {}, lines = [];
+  const seen = {}, lines = [], news = { runs: 0, posted: 0, failed: 0, scores: [] };
   for (const run of runs.sort((a, b) => a.created_at.localeCompare(b.created_at))) {
     if (run.id === +process.env.GITHUB_RUN_ID) continue;
     const jobs = (await (await api(`/actions/runs/${run.id}/jobs`)).json()).jobs || [];
     let log = ''; try { if (jobs[0]) log = await (await api(`/actions/jobs/${jobs[0].id}/logs`)).text(); } catch { }
+    if (/news check started/.test(log)) {                                    // news checks: one summary line, not one per run
+      news.runs++;
+      if (run.conclusion !== 'success' || /news AI failed/.test(log)) news.failed++;
+      for (const m of log.matchAll(/news posted: (\d+)\/10/g)) { news.posted++; news.scores.push(+m[1]); }
+      continue;
+    }
     if (/health check started/.test(log) || (run.status !== 'completed' && !log)) {  // other health checks, or a run still going
       if (run.status !== 'completed' && !/health check started/.test(log)) lines.push(`⏳ run #${run.run_number} still running`);
       continue;
@@ -272,15 +363,18 @@ async function healthCheck(uk) {
   const nowMin = +uk.time.slice(0, 2) * 60 + +uk.time.slice(3, 5);
   const missing = REPORT_SLOTS.filter(s => !seen[s] && (+SLOTS[s].uk.slice(0, 2) * 60 + +SLOTS[s].uk.slice(3, 5)) + 30 < nowMin);
   for (const s of missing) lines.push(`❓ **${s}** (${SLOTS[s].uk}): no run found - GitHub didn't start it`);
-  const bad = lines.filter(l => /^(❌|⚠️|❓)/.test(l) && !/manual test/.test(l)).length;   // manual tests don't count as problems
+  if (news.runs) lines.push(`${news.failed ? '⚠️' : '📰'} **news**: ${news.runs} checks, ${news.posted} posted${news.scores.length ? ' (scores ' + news.scores.join(', ') + ')' : ''}${news.failed ? `, ${news.failed} failed` : ''}`);
+  const bad = lines.filter(l => /^(❌|⚠️|❓)/.test(l) && !/manual test/.test(l)).length;
+  if (runs.length >= 100) lines.push('(only the first 100 runs of the day were checked)');   // manual tests don't count as problems
   await alert(`**🩺 BOT HEALTH · ${uk.weekday} ${uk.date}** - ${bad ? bad + ' problem(s)' : 'all good'}\n\n${lines.join('\n') || 'no runs today'}`, bad ? 0xf85149 : 0x3fb950);
 }
 
 (async () => {
   const uk = ukNow();
   const slot = pickSlot(uk);
-  if (!slot || !SLOTS[slot]) { console.log(`no report due (UK ${uk.time}, cron "${process.env.CRON || ''}") - other season's timer, exiting`); return; }
+  if (!slot || (!SLOTS[slot] && slot !== 'news')) { console.log(`no report due (UK ${uk.time}, cron "${process.env.CRON || ''}") - other season's timer, exiting`); return; }
   if (slot === 'health') { console.log('health check started'); await healthCheck(uk); return; }
+  if (slot === 'news') { status.slot = 'news'; await newsCheck(uk); return; }
   status.slot = slot;
   console.log(`report: ${slot} · UK ${uk.weekday} ${uk.date} ${uk.time}`);
   const t0 = Date.now();

@@ -229,15 +229,20 @@ async function healthCheck(uk) {
     if (run.id === +process.env.GITHUB_RUN_ID) continue;
     const jobs = (await (await api(`/actions/runs/${run.id}/jobs`)).json()).jobs || [];
     let log = ''; try { if (jobs[0]) log = await (await api(`/actions/jobs/${jobs[0].id}/logs`)).text(); } catch { }
+    if (/health check started/.test(log) || (run.status !== 'completed' && !log)) {  // other health checks, or a run still going
+      if (run.status !== 'completed' && !/health check started/.test(log)) lines.push(`⏳ run #${run.run_number} still running`);
+      continue;
+    }
     const slot = (log.match(/report: (\w+)/) || [])[1];
     if (!slot && /no report due/.test(log)) continue;                       // the other season's timer
     const t = ukParts(new Date(run.updated_at)), at = `${t.hour}:${t.minute}`, late = Math.round((Date.parse(run.run_started_at) - Date.parse(run.created_at)) / 60e3);
     const manual = run.event === 'workflow_dispatch' ? ' (manual test)' : '';
     const model = (log.match(/model used: ([^\r\n]+)/) || [])[1];
     let line;
-    if (run.conclusion !== 'success') line = `❌ **${slot || '?'}**${manual} ${at}: run ${run.conclusion || run.status}`;
+    if (run.status !== 'completed') line = `⏳ **${slot || '?'}**${manual} ${at}: still running`;
+    else if (run.conclusion !== 'success') line = `❌ **${slot || '?'}**${manual} ${at}: run ${run.conclusion}`;
     else if (/skipped/.test(log)) line = `⏭️ **${slot}**${manual} ${at}: skipped - ${(log.match(/(no [^\r\n]*?) - skipped|(nothing to report[^\r\n]*)/) || [])[1] || 'nothing to report'}`;
-    else if (/AI report failed/.test(log)) line = `⚠️ **${slot}**${manual} ${at}: basic report only - ${(log.match(/AI report failed: ([^\r\n]+)/) || [])[1]}`;
+    else if (/AI report failed/.test(log)) line = `⚠️ **${slot}**${manual} ${at}: basic report only - ${cut((log.match(/AI report failed: ([^\r\n]+)/) || [])[1], 120)}`;
     else if (/posted to Discord/.test(log)) line = `✅ **${slot}**${manual} ${at}${model ? ' · ' + model.replace(' (no web search)', '') : ''}`;
     else line = `❓ **${slot || '?'}**${manual} ${at}: finished but nothing posted`;
     if (late >= 15) line += ` · started ${late} min late`;
@@ -246,7 +251,7 @@ async function healthCheck(uk) {
   const nowMin = +uk.time.slice(0, 2) * 60 + +uk.time.slice(3, 5);
   const missing = REPORT_SLOTS.filter(s => !seen[s] && (+SLOTS[s].uk.slice(0, 2) * 60 + +SLOTS[s].uk.slice(3, 5)) + 30 < nowMin);
   for (const s of missing) lines.push(`❓ **${s}** (${SLOTS[s].uk}): no run found - GitHub didn't start it`);
-  const bad = lines.filter(l => /^(❌|⚠️|❓)/.test(l)).length;
+  const bad = lines.filter(l => /^(❌|⚠️|❓)/.test(l) && !/manual test/.test(l)).length;   // manual tests don't count as problems
   await alert(`**🩺 BOT HEALTH · ${uk.weekday} ${uk.date}** - ${bad ? bad + ' problem(s)' : 'all good'}\n\n${lines.join('\n') || 'no runs today'}`, bad ? 0xf85149 : 0x3fb950);
 }
 
@@ -254,7 +259,7 @@ async function healthCheck(uk) {
   const uk = ukNow();
   const slot = pickSlot(uk);
   if (!slot || !SLOTS[slot]) { console.log(`no report due (UK ${uk.time}, cron "${process.env.CRON || ''}") - other season's timer, exiting`); return; }
-  if (slot === 'health') { await healthCheck(uk); return; }
+  if (slot === 'health') { console.log('health check started'); await healthCheck(uk); return; }
   status.slot = slot;
   console.log(`report: ${slot} · UK ${uk.weekday} ${uk.date} ${uk.time}`);
   const t0 = Date.now();

@@ -23,6 +23,7 @@ Answer with ONE JSON object and nothing else, in this shape (leave out keys that
   "confidence": "LOW" | "MEDIUM" | "HIGH",
   "headline": "very short extra title, e.g. 'PCE cooler than expected' or 'Microsoft -4.8% after hours' (optional)",
   "result": ["for result reports: actual vs forecast, guidance, reaction"],
+  "scenarios": ["only when the request lists earlier scenarios: one line per scenario, e.g. '✅ Happened: PMIs beat (56.1 vs 55.4) and inflation expectations eased - bias now BULLISH'"],
   "why": ["reasons for the bias"],
   "watch": ["what to watch next, e.g. the next release and its forecast, or a big company reporting"],
   "change": ["what result would flip the bias, and to what"],

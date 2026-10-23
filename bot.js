@@ -361,7 +361,7 @@ async function newsDesk(uk, desk) {
     try { res = parseJson(await callGemini(desk.system, user, false)); }
     catch (e) { console.log(`${desk.label} AI failed: ` + e.message); await alert(`⚠️ **${desk.label}** ${et()} ET: the AI check failed (${cut(e.message, 200)}) - ${fresh.length} headlines not checked.`); for (const x of fresh) delete st.seen[x.id]; res = { stories: [] }; }
     const arrow = v => v === 'up' ? '🟢' : v === 'down' ? '🔴' : '⚪';
-    for (const s of (res.stories || []).filter(s => s.score >= NEWS_MIN).sort((a, b) => b.score - a.score).slice(0, 5)) {
+    for (const s of (res.stories || []).filter(s => s.score >= NEWS_MIN).sort((a, b) => b.score - a.score).slice(0, 2)) {   // 2026-10-23: 31 posts in a day was too many - at most 2 per check
       const src = fresh.filter(x => (s.ids || []).map(String).includes(x.id)).sort((a, b) => a.when - b.when)[0] || {};
       const tag = s.score >= 8 ? '🚨 BREAKING' : s.score >= 7 ? '⚠️ NEWS' : desk.tag6;
       const dir = desk.dir[s.direction] || 'Direction unclear';

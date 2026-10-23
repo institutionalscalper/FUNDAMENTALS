@@ -1,0 +1,42 @@
+name: Fundamentals reports
+
+# Times are UTC. Each UK report time has two timers: one for UK summer time, one for winter time.
+# bot.js checks the UK clock and the timer that doesn't match exits in seconds.
+on:
+  schedule:
+    - cron: '0 6 * * 1-5'    # 07:00 UK summer  - morning brief
+    - cron: '0 7 * * 1-5'    # 07:00 UK winter
+    - cron: '0 12 * * 1-5'   # 13:00 UK summer  - midday
+    - cron: '0 13 * * 1-5'   # 13:00 UK winter
+    - cron: '32 12 * * 1-5'  # 13:32 UK summer  - data result (skipped if no release)
+    - cron: '32 13 * * 1-5'  # 13:32 UK winter
+    - cron: '25 13 * * 1-5'  # 14:25 UK summer  - before the NY open
+    - cron: '25 14 * * 1-5'  # 14:25 UK winter
+    - cron: '2 14 * * 1-5'   # 15:02 UK summer  - data result (skipped if no release)
+    - cron: '2 15 * * 1-5'   # 15:02 UK winter
+    - cron: '20 20 * * 1-5'  # 21:20 UK summer  - earnings (skipped if no big company reported)
+    - cron: '20 21 * * 1-5'  # 21:20 UK winter
+  workflow_dispatch:
+    inputs:
+      slot:
+        description: 'Report to send now'
+        required: true
+        default: morning
+        type: choice
+        options: [morning, midday, post1, preny, post2, earnings]
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node bot.js
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          CRON: ${{ github.event.schedule }}
+          SLOT: ${{ github.event.inputs.slot }}

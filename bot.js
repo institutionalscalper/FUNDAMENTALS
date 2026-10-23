@@ -23,7 +23,7 @@ const FEEDS = [
   'https://news.google.com/rss/search?q=nasdaq+futures+when:1d&hl=en-US&gl=US&ceid=US:en',
   'https://news.google.com/rss/search?q=fed+OR+inflation+OR+treasury+yields+when:1d&hl=en-US&gl=US&ceid=US:en',
 ];
-const COLOR = { BULLISH: 0x3fb950, BEARISH: 0xf85149, NEUTRAL: 0xf0b232 };
+const COLOR = { BULLISH: 0x3fb950, BEARISH: 0xf85149, NEUTRAL: 0x99aab5 };   // green / red / grey
 const TIMEOUT = { feed: 15e3, ai: 150e3, discord: 20e3 };   // ms - a hung request must never keep the job running
 const DISCLAIMER = 'Educational market context only, not financial advice';
 

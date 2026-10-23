@@ -308,7 +308,7 @@ Answer with ONE JSON object only: {"stories":[{"ids":["headline ids"],"score":6-
       const moves = Object.entries(s.moves || {}).map(([k, v]) => `${k} ${arrow(v)}`).join(' · ');
       await post({
         title: cut(`${tag} · Impact ${s.score}/10`, 256), url: src.link || undefined,
-        description: cut(`**${s.headline}**\n__**${dir}**__\n${(s.why || []).map(x => '• ' + x).join('\n')}${moves ? `\n**Likely moves:** ${moves}` : ''}`, 4000),
+        description: cut(`**${s.headline}**\n\n​\n__**${dir}**__\n${(s.why || []).map(x => '• ' + x).join('\n\n')}${moves ? `\n\n​\n**Likely moves:** ${moves}` : ''}`, 4000),   // ​ line = wider gap
         color: s.direction === 'RISK_OFF' ? COLOR.BEARISH : s.direction === 'RISK_ON' ? COLOR.BULLISH : COLOR.NEUTRAL,
         footer: { text: `${src.src ? 'Source: ' + src.src + ' · ' : ''}${t ? t.hour + ':' + t.minute + ' UK · ' : ''}${DISCLAIMER}` }, timestamp: new Date().toISOString(),
       }, process.env.NEWS_WEBHOOK, 'BREAKING NEWS');

@@ -156,7 +156,11 @@ async function callGemini(system, user, trySearch = true) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error('GEMINI_API_KEY not set');
   let lastErr;
-  for (const search of trySearch ? [true, false] : [false]) for (const model of MODELS) {
+  // 503 / 500 / 429 = Google busy for a moment: after every model failed, wait 20 s and go round once more (no web search)
+  const rounds = trySearch ? [true, false, 'retry'] : [false, 'retry'];
+  for (const round of rounds) for (const model of MODELS) {
+    if (round === 'retry') { if (!/: (5\d\d|429)\b/.test(lastErr?.message || '')) break; if (model === MODELS[0]) { console.log('all models busy - waiting 20 s and trying again'); await new Promise(r => setTimeout(r, 20000)); } }
+    const search = round === true;
     const tag = `${model}${search ? ' + web search' : ' (no web search)'}`;
     try {
       const body = { systemInstruction: { parts: [{ text: system }] }, generationConfig: { temperature: 0.3 },

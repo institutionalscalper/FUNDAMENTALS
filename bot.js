@@ -38,6 +38,12 @@ function ukNow() {
 }
 
 function pickSlot(uk) {
+  if (process.env.SLOT === 'auto') {   // started by cron-job.org (2026-10-23: GitHub's own timer ran the 10:02 report 4 h late): the report due in the last 20 min
+    console.log('started by timer (cron-job.org)');
+    const now = et(), m = t => +t.slice(0, 2) * 60 + +t.slice(3, 5);
+    const due = Object.keys(SLOTS).map(k => [k, m(now) - m(SLOTS[k].ny)]).filter(([, d]) => d >= 0 && d <= 15).sort((a, b) => a[1] - b[1]);
+    return due.length ? due[0][0] : null;   // 15 min max: 16:30 earnings and 16:50 health stay apart
+  }
   if (process.env.SLOT) return process.env.SLOT;
   const cron = (process.env.CRON || '').trim().split(/\s+/);
   if (cron.length < 2) return null;
@@ -402,7 +408,7 @@ async function healthCheck(uk) {
     const slot = (log.match(/report: (\w+)/) || [])[1];
     if (!slot && /no report due/.test(log)) continue;                       // the other season's timer
     const at = et(new Date(run.updated_at)) + ' ET', late = Math.round((Date.parse(run.run_started_at) - Date.parse(run.created_at)) / 60e3);
-    const manual = run.event === 'workflow_dispatch' ? ' (manual test)' : '';
+    const manual = run.event === 'workflow_dispatch' && !/started by timer/.test(log) ? ' (manual test)' : '';
     const model = (log.match(/model used: ([^\r\n]+)/) || [])[1];
     let line;
     if (run.status !== 'completed') line = `⏳ **${slot || '?'}**${manual} ${at}: still running`;

@@ -316,6 +316,7 @@ Impact scale (be strict and consistent):
 5 or less = normal news flow: ignore.
 Partial or targeted measures (tariffs removed on SOME goods, one sector, a small partner, done for local politics) score 1-2 lower than the full version, and the headline keeps the limiting word ("some", "certain", "farm goods").
 Follow-ups to a story already posted (same conflict, same oil spike, same tariff fight): post only a genuinely NEW development (a new attack, a new country involved, a new record level) and score it at most 7. Prices mentioned in headlines may be hours old - prefer the newest headline's number and never call an old level the current one.
+Skip a story when a story already posted (listed) is about the same subject and newer or opposite (e.g. "stocks recover on diplomacy hopes" after "Trump threatens new strike" was posted) - the market has moved on.
 Rules: group headlines about the same event into one story. Skip stories already posted (listed). Skip opinion pieces, "what to watch" previews, explainers and market wrap-ups that only describe moves. Never invent facts beyond the headlines. Plain simple English, bullets under 20 words. Never say buy/sell.
 Answer with ONE JSON object only: {"stories":[{"ids":["headline ids"],"score":6-10,"headline":"short clear headline","direction":"RISK_ON"|"RISK_OFF"|"UNCLEAR","why":["1-2 bullets: why it matters for NQ"],"moves":{"NQ":"up|down|flat","Oil":"up|down|flat","Gold":"up|down|flat","Dollar":"up|down|flat","Yields":"up|down|flat"}}]} - only stories scoring ${NEWS_MIN} or more; {"stories":[]} if none.`,
   },
@@ -348,14 +349,14 @@ async function newsDesk(uk, desk) {
   let st = { seen: {}, posted: [] };
   try { st = JSON.parse(fs.readFileSync(desk.state, 'utf8')); } catch { console.log(`${desk.label}: no saved state - first run`); }
   const now = Date.now(), firstRun = !Object.keys(st.seen).length;
-  const allNew = (await newsItems(desk.feeds, desk.trusted)).filter(x => !st.seen[x.id] && now - x.when < (firstRun ? 45 : 180) * 60e3).sort((a, b) => b.when - a.when);
+  const allNew = (await newsItems(desk.feeds, desk.trusted)).filter(x => !st.seen[x.id] && now - x.when < (firstRun ? 45 : 75) * 60e3)   // 2026-10-23: a 15:09 ET story reached the feed at 16:30 and was posted after a newer opposite one - older than 75 min = stale for traders.sort((a, b) => b.when - a.when);
   for (const x of allNew) st.seen[x.id] = x.when;                                   // everything fetched counts as seen
   const fresh = allNew.slice(0, 60);
   console.log(`${desk.label}: ${allNew.length} new headlines${allNew.length > 60 ? ' (newest 60 checked)' : ''}`);
   for (const k in st.seen) if (now - st.seen[k] > 2 * 864e5) delete st.seen[k];      // remember 2 days
   st.posted = (st.posted || []).filter(p => now - p.t < 864e5);
   if (fresh.length) {
-    const user = `New York time now ${uk.weekday} ${uk.date} ${et()} ET.\n\nAlready posted in the last 24 h (do not repeat):\n${st.posted.map(p => '- ' + p.h).join('\n') || 'none'}\n\nNew headlines:\n${fresh.map(x => `[${x.id}] ${x.title}${x.src ? ' (' + x.src + ')' : ''}`).join('\n')}`;
+    const user = `New York time now ${uk.weekday} ${uk.date} ${et()} ET.\n\nAlready posted in the last 24 h (do not repeat):\n${st.posted.map(p => `- ${et(new Date(p.t))} ET: ${p.h}`).join('\n') || 'none'}\n\nNew headlines:\n${fresh.map(x => `[${x.id}] ${et(new Date(x.when))} ET: ${x.title}${x.src ? ' (' + x.src + ')' : ''}`).join('\n')}`;
     let res;
     try { res = parseJson(await callGemini(desk.system, user, false)); }
     catch (e) { console.log(`${desk.label} AI failed: ` + e.message); await alert(`⚠️ **${desk.label}** ${et()} ET: the AI check failed (${cut(e.message, 200)}) - ${fresh.length} headlines not checked.`); for (const x of fresh) delete st.seen[x.id]; res = { stories: [] }; }

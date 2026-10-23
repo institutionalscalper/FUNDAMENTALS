@@ -354,7 +354,7 @@ async function newsDesk(uk, desk) {
         title: cut(`${tag} · Impact ${s.score}/10`, 256), url: src.link || undefined,
         description: cut(`**${s.headline}**\n\n​\n__**${dir}**__\n${(s.why || []).map(x => '• ' + x).join('\n\n')}${moves ? `\n\n​\n**Likely moves:** ${moves}` : ''}`, 4000),   // ​ line = wider gap
         color: s.direction === 'RISK_OFF' ? COLOR.BEARISH : s.direction === 'RISK_ON' ? COLOR.BULLISH : COLOR.NEUTRAL,
-        footer: { text: `${src.src ? 'Source: ' + src.src + ' · ' : ''}${t ? t.hour + ':' + t.minute + ' UK · ' : ''}${DISCLAIMER}` }, timestamp: new Date().toISOString(),
+        footer: { text: `${t ? t.hour + ':' + t.minute + ' UK · ' : ''}${DISCLAIMER}` }, timestamp: new Date().toISOString(),
       }, process.env[desk.webhook], desk.username);
       st.posted.push({ t: now, h: s.headline });
       console.log(`${desk.label} posted: ${s.score}/10 ${s.headline}`);

@@ -203,7 +203,7 @@ function buildEmbed(slot, r, n, extra = {}) {
   if (r.headlines?.length) parts.push('**HEADLINES**\n' + r.headlines.slice(0, 3).map(x => '• ' + x).join('\n'));
   return {
     title: cut(`${SLOTS[slot].title}${r.headline ? ': ' + r.headline : ''} · NQ bias ${bias}${conf ? ' · confidence ' + conf : ''}`, 256),
-    description: cut(parts.join('\n\n'), 4000),
+    description: cut(parts.join('\n\n​\n'), 4000),   // blank line + invisible line = a wider gap between sections (Discord drops plain extra blank lines)
     color: COLOR[bias] ?? COLOR.NEUTRAL,
     footer: { text: `${DISCLAIMER} · next report ${SLOTS[slot].next} · calendar & earnings: Nasdaq` },
     timestamp: new Date().toISOString(),

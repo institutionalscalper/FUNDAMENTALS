@@ -73,17 +73,19 @@ async function marketNumbers() {
 // free news headlines (RSS titles from the last day), so the report still has news when web search isn't available
 async function headlines() {
   const unesc = s => s.replace(/<!\[CDATA\[|\]\]>/g, '').replace(/&amp;/g, '&').replace(/&apos;|&#39;|&#x2019;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
-  const out = new Set();
+  const out = new Map();   // title -> age in hours (2026-10-23: the AI read yesterday's "Nasdaq ends sharply lower" as today's news, so each headline now carries its age)
   await Promise.all(FEEDS.map(async u => {
     try {
       const t = await (await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(TIMEOUT.feed) })).text();
       for (const m of [...t.matchAll(/<item>([\s\S]*?)<\/item>/g)].slice(0, 10)) {
         const title = (m[1].match(/<title>([\s\S]*?)<\/title>/) || [])[1], date = (m[1].match(/<pubDate>([\s\S]*?)<\/pubDate>/) || [])[1];
-        if (title && (!date || Date.now() - Date.parse(date) < 36 * 3600e3)) out.add(unesc(title));
+        const age = date ? (Date.now() - Date.parse(date)) / 3600e3 : NaN;
+        if (title && !(age >= 36)) { const k = unesc(title); if (!out.has(k) || age < out.get(k)) out.set(k, age); }
       }
     } catch { }
   }));
-  return [...out].slice(0, 40);
+  return [...out].sort((a, b) => (isNaN(a[1]) ? 99 : a[1]) - (isNaN(b[1]) ? 99 : b[1])).slice(0, 40)
+    .map(([h, age]) => `${isNaN(age) ? '[age unknown]' : age < 1 ? '[under 1 h ago]' : `[${Math.round(age)} h ago]`} ${h}`);
 }
 const JSON_H = { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' };
 const getJson = async u => (await fetch(u, { headers: JSON_H, signal: AbortSignal.timeout(TIMEOUT.feed) })).json();
@@ -491,7 +493,7 @@ async function healthCheck(uk) {
     `US economic calendar today (UK time; "actual" = already released):\n${cal ? (calendarLines(today).join('\n').replace(/\*\*/g, '') || 'nothing medium/high today') : 'not available'}\n\n` +
     (extra.results?.length ? `Earnings results today (from data feeds):\n${resultLines(extra.results, extra.resultsPre).join('\n').replace(/\*\*/g, '')}\n\n`
       : earn.length ? `Earnings of big Nasdaq-100 companies:\n${earningsLines(earn, uk.date).join('\n').replace(/\*\*/g, '')}\n\n` : '') +
-    `Today's headlines (free news feeds):\n${news.map(h => '- ' + h).join('\n') || 'none'}\n\n` +
+    `Headlines (free news feeds, newest first, each marked with its age). Anything older than about 12 h is from the previous session: do not describe it as happening today, and when it disagrees with today's price change above, trust the price change:\n${news.map(h => '- ' + h).join('\n') || 'none'}\n\n` +
     `Search the web if you can for anything missing (results, guidance, reactions). Then answer with the JSON object only.`;
   let embed;
   try {

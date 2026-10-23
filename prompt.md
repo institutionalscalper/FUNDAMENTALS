@@ -27,7 +27,7 @@ Answer with ONE JSON object and nothing else, in this shape (leave out keys that
   "why": ["reasons for the bias"],
   "watch": ["what to watch next, e.g. the next release and its forecast, or a big company reporting"],
   "change": ["what result would flip the bias, and to what"],
-  "headlines": ["Source: short headline"]
+  "headlines": ["outlet name, colon, short headline - e.g. 'WSJ: Nasdaq futures steady as AI selloff pauses'"]
 }
 The calendar and earnings lists are shown to readers separately (from data feeds), so do NOT repeat them as lists; use them in your reasoning, "watch" and "change".
 For data results, compare the released number with the expected one given in the request.

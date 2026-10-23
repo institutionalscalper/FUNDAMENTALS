@@ -22,6 +22,7 @@ const FEEDS = [
   'https://news.google.com/rss/search?q=fed+OR+inflation+OR+treasury+yields+when:1d&hl=en-US&gl=US&ceid=US:en',
 ];
 const COLOR = { BULLISH: 0x3fb950, BEARISH: 0xf85149, NEUTRAL: 0xf0b232 };
+const TIMEOUT = { feed: 15e3, ai: 150e3, discord: 20e3 };   // ms - a hung request must never keep the job running
 const DISCLAIMER = 'Educational market context only, not financial advice';
 
 function ukNow() {
@@ -42,7 +43,7 @@ function pickSlot(uk) {
 // free delayed prices (Yahoo). Optional: the report still works without them.
 async function quote(sym) {
   try {
-    const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=1d&interval=5m`, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=1d&interval=5m`, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(TIMEOUT.feed) });
     const m = (await r.json()).chart.result[0].meta;
     if (!(m.regularMarketPrice > 0 && m.chartPreviousClose > 0)) return null;
     return { px: m.regularMarketPrice, chg: m.regularMarketPrice - m.chartPreviousClose, pct: 100 * (m.regularMarketPrice / m.chartPreviousClose - 1) };
@@ -58,7 +59,7 @@ async function headlines() {
   const out = new Set();
   await Promise.all(FEEDS.map(async u => {
     try {
-      const t = await (await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0' } })).text();
+      const t = await (await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(TIMEOUT.feed) })).text();
       for (const m of [...t.matchAll(/<item>([\s\S]*?)<\/item>/g)].slice(0, 10)) {
         const title = (m[1].match(/<title>([\s\S]*?)<\/title>/) || [])[1], date = (m[1].match(/<pubDate>([\s\S]*?)<\/pubDate>/) || [])[1];
         if (title && (!date || Date.now() - Date.parse(date) < 36 * 3600e3)) out.add(unesc(title));
@@ -66,6 +67,46 @@ async function headlines() {
     } catch { }
   }));
   return [...out].slice(0, 40);
+}
+const JSON_H = { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' };
+const getJson = async u => (await fetch(u, { headers: JSON_H, signal: AbortSignal.timeout(TIMEOUT.feed) })).json();
+const ukParts = d => Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', weekday: 'short', hourCycle: 'h23' }).formatToParts(d).map(x => [x.type, x.value]));
+const addDays = (ymd, k) => { const d = new Date(ymd + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + k); return d.toISOString().slice(0, 10); };
+
+// which US releases matter for NQ (Nasdaq's calendar has no importance rating)
+const HIGH = /\b(CPI|PCE|Nonfarm Payrolls|Unemployment Rate|Retail Sales|GDP|Interest Rate Decision|Fed Funds|FOMC|ISM (Manufacturing|Non-Manufacturing|Services)|PPI)\b/i;
+const MEDIUM = /\b(Jobless Claims|Michigan (Consumer Sentiment|1-Year Inflation|5-Year Inflation)|S&P Global (Manufacturing|Services|Composite) PMI|ADP (Nonfarm|Employment Change)$|JOLTS|Durable Goods|CB Consumer Confidence|Average Hourly Earnings|Powell|Beige Book|New Home Sales|Existing Home Sales|Philadelphia Fed|NY Empire|Industrial Production)\b/i;
+const SKIP = /4-Week Avg|Continuing|CFTC|Baker Hughes|Mortgage|Natural Gas|Crude|Auction|Leading Index|Weekly/i;
+const clean = s => String(s || '').replace(/&nbsp;/g, '').trim();
+// New York wall time -> UK "HH:MM" (works across both clock changes)
+function nyToUk(ymd, hhmm) {
+  const [y, mo, d] = ymd.split('-').map(Number), [h, mi] = hhmm.split(':').map(Number);
+  let t = Date.UTC(y, mo - 1, d, h + 5, mi);
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(t)).map(x => [x.type, x.value]));
+  t -= ((+p.hour * 60 + +p.minute) - (h * 60 + mi)) * 60e3;
+  const u = ukParts(new Date(t)); return `${u.hour}:${u.minute}`;
+}
+// today's US calendar with forecasts and (once out) actual numbers, UK time. Nasdaq's date parameter returns the previous day, so ask for tomorrow.
+async function calendar(ukDate) {
+  try {
+    return ((await getJson('https://api.nasdaq.com/api/calendar/economicevents?date=' + addDays(ukDate, 1))).data?.rows || [])
+      .filter(x => x.country === 'United States' && !SKIP.test(x.eventName) && (HIGH.test(x.eventName) || MEDIUM.test(x.eventName)))
+      .map(x => ({ time: nyToUk(ukDate, x.gmt), impact: HIGH.test(x.eventName) ? 'High' : 'Medium', title: x.eventName, forecast: clean(x.consensus), previous: clean(x.previous), actual: clean(x.actual) }))
+      .sort((a, b) => a.time.localeCompare(b.time));
+  } catch { return null; }
+}
+// earnings of the biggest Nasdaq-100 companies (Nasdaq earnings calendar)
+const BIG = new Set(['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'AVGO', 'TSLA', 'NFLX', 'COST', 'AMD', 'PLTR', 'ASML', 'CSCO', 'TMUS', 'ADBE', 'QCOM', 'INTU', 'AMAT', 'TXN', 'ISRG', 'BKNG', 'PEP', 'LIN', 'MU', 'LRCX', 'ARM']);
+async function earnings(dates) {
+  const out = [];
+  await Promise.all(dates.map(async d => {
+    try {
+      for (const x of (await getJson('https://api.nasdaq.com/api/calendar/earnings?date=' + d)).data?.rows || [])
+        if (BIG.has(x.symbol)) out.push({ date: d, symbol: x.symbol, name: x.name, when: /after/.test(x.time) ? 'after the close (~21:00 UK)' : /pre/.test(x.time) ? 'before the open (~12:00-13:00 UK)' : 'time not given', eps: x.epsForecast || '' });
+    } catch { }
+  }));
+  return out.sort((a, b) => a.date.localeCompare(b.date));
 }
 const sgn = (v, d = 0) => (v > 0 ? '+' : '') + v.toFixed(d);
 function numbersText(n) {
@@ -82,7 +123,7 @@ function slotTask(slot) {
     case 'midday': return 'MIDDAY UPDATE. What changed since the morning; the next release and what result would flip the bias.';
     case 'post1': return 'DATA RESULT. If NO high-impact US release came out between 12:25 and 13:35 UK time today, return {"skip": true}. Otherwise report actual vs forecast, the immediate reaction in yields/NQ, and whether the bias changes.';
     case 'preny': return 'BEFORE THE NY OPEN (14:30 UK). Bias for the cash session, what to watch in the first hours, the next release.';
-    case 'post2': return 'DATA RESULT. If NO high-impact or medium-impact US release came out between 14:55 and 15:05 UK time today, return {"skip": true}. Otherwise report actual vs forecast, the reaction, and whether the bias changes.';
+    case 'post2': return 'DATA RESULT. If NO high-impact or medium-impact US release came out between 14:40 and 15:05 UK time today, return {"skip": true}. Otherwise report actual vs forecast, the reaction, and whether the bias changes.';
     case 'earnings': return 'EARNINGS RESULT. If none of the 15 largest Nasdaq-100 companies reported results after the US close today, return {"skip": true}. Otherwise for each: EPS and revenue vs expected, guidance vs expected, after-hours move of the stock and NQ, why it moved, and the NQ bias for tomorrow.';
   }
 }
@@ -99,7 +140,7 @@ async function callGemini(system, user) {
         contents: [{ role: 'user', parts: [{ text: search ? user : user + '\n\nWeb search is not available this time: work from the headlines above only, and leave out forecasts and calendar items you cannot see.' }] }] };
       if (search) body.tools = [{ google_search: {} }];
       const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body) });
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body), signal: AbortSignal.timeout(TIMEOUT.ai) });
       const j = await r.json();
       if (!r.ok) { lastErr = new Error(`${tag}: ${r.status}`); console.log(`${tag}: ${r.status} ${JSON.stringify(j.error || j).slice(0, 1500)}`); continue; }
       const text = (j.candidates?.[0]?.content?.parts || []).filter(p => p.text && !p.thought).map(p => p.text).join('\n');
@@ -117,9 +158,12 @@ function parseJson(text) {
 }
 
 const cut = (s, n) => (s = String(s || '')).length > n ? s.slice(0, n - 1) + '…' : s;
-const impactIcon = i => /high/i.test(i) ? '🔴' : /med/i.test(i) ? '🟠' : '⚪';
 
-function buildEmbed(slot, r, n) {
+const dayName = ymd => new Date(ymd + 'T12:00:00Z').toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'UTC' });
+function calendarLines(evts) { return evts.map(e => `${e.time} ${e.impact === 'High' ? '🔴' : '🟠'} ${e.title}${e.actual ? ` · actual **${e.actual}**` : ''}${e.forecast ? ` · forecast ${e.forecast}` : ''}${e.previous ? ` · previous ${e.previous}` : ''}`); }
+function earningsLines(list, today) { return list.map(e => `${e.date === today ? '**Today**' : dayName(e.date)} · **${e.name.replace(/,? Inc\.?|\s+Corporation|\s+Incorporated/g, '')}** (${e.symbol}) · ${e.when}${e.eps ? ` · EPS forecast ${e.eps}` : ''}`); }
+
+function buildEmbed(slot, r, n, extra = {}) {
   const bias = (r.bias || 'NEUTRAL').toUpperCase(), conf = (r.confidence || '').toUpperCase();
   const parts = [];
   const nums = [];
@@ -129,8 +173,8 @@ function buildEmbed(slot, r, n) {
   if (nums.length && slot !== 'earnings') parts.push(nums.join(' · '));
   if (r.result?.length) parts.push('**RESULT**\n' + r.result.map(x => '• ' + x).join('\n'));
   if (r.why?.length) parts.push('**WHY**\n' + r.why.map(x => '• ' + x).join('\n'));
-  if (r.calendar?.length) parts.push('**TODAY (UK TIME)**\n' + r.calendar.map(c => `${c.time_uk || ''} ${impactIcon(c.impact)} ${c.event || ''}${c.forecast ? ` · forecast ${c.forecast}` : ''}${c.actual ? ` · actual **${c.actual}**` : ''}`).join('\n'));
-  if (r.earnings?.length) parts.push('**📅 EARNINGS (big NQ companies)**\n' + r.earnings.map(e => `${e.day || ''} · **${e.company || ''}** · ${e.time_uk || ''}${e.expected_move ? ` · expected move ${e.expected_move}` : ''}`).join('\n'));
+  if (extra.calendar) parts.push(`**${extra.calendarTitle}**\n` + (extra.calendar.length ? calendarLines(extra.calendar).join('\n') : 'No medium or high impact US data.'));
+  if (extra.earnings?.length) parts.push('**📅 EARNINGS (big NQ companies)**\n' + earningsLines(extra.earnings, extra.today).join('\n'));
   if (r.watch?.length) parts.push('**WATCH**\n' + r.watch.map(x => '• ' + x).join('\n'));
   if (r.change?.length) parts.push('**WHAT WOULD CHANGE IT**\n' + r.change.map(x => '• ' + x).join('\n'));
   if (r.headlines?.length) parts.push('**HEADLINES**\n' + r.headlines.slice(0, 3).map(x => '• ' + x).join('\n'));
@@ -138,7 +182,7 @@ function buildEmbed(slot, r, n) {
     title: cut(`${SLOTS[slot].title}${r.headline ? ': ' + r.headline : ''} · NQ bias ${bias}${conf ? ' · confidence ' + conf : ''}`, 256),
     description: cut(parts.join('\n\n'), 4000),
     color: COLOR[bias] ?? COLOR.NEUTRAL,
-    footer: { text: `${DISCLAIMER} · next report ${SLOTS[slot].next}` },
+    footer: { text: `${DISCLAIMER} · next report ${SLOTS[slot].next} · calendar & earnings: Nasdaq` },
     timestamp: new Date().toISOString(),
   };
 }
@@ -161,7 +205,7 @@ async function post(embed) {
   const body = { username: 'FUNDAMENTALS', embeds: [embed] };
   if (process.env.DRY === '1') { console.log(JSON.stringify(body, null, 2)); return; }
   if (!process.env.DISCORD_WEBHOOK) throw new Error('DISCORD_WEBHOOK not set');
-  const r = await fetch(process.env.DISCORD_WEBHOOK, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await fetch(process.env.DISCORD_WEBHOOK, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(TIMEOUT.discord) });
   if (!r.ok) throw new Error(`Discord ${r.status} ${await r.text()}`);
   console.log('posted to Discord');
 }
@@ -171,19 +215,48 @@ async function post(embed) {
   const slot = pickSlot(uk);
   if (!slot || !SLOTS[slot]) { console.log(`no report due (UK ${uk.time}, cron "${process.env.CRON || ''}") - other season's timer, exiting`); return; }
   console.log(`report: ${slot} · UK ${uk.weekday} ${uk.date} ${uk.time}`);
-  const [n, news] = await Promise.all([marketNumbers(), headlines()]);
-  console.log(`prices: ${n.nq ? 'NQ ok' : 'NQ missing'}, ${n.tnx ? '10y ok' : '10y missing'}, ${n.dxy ? 'DXY ok' : 'DXY missing'} · headlines: ${news.length}`);
+  const t0 = Date.now();
+  // morning: earnings for the rest of the week; earnings report: today only
+  const weekDates = []; for (let k = 0, d = uk.date; k < 7 && weekDates.length < 5; k++, d = addDays(uk.date, k)) { const w = new Date(d + 'T12:00:00Z').getUTCDay(); if (w >= 1 && w <= 5) weekDates.push(d); if (w === 5) break; }
+  const [n, news, cal, earn] = await Promise.all([marketNumbers(), headlines(), calendar(uk.date),
+    slot === 'morning' ? earnings(weekDates) : slot === 'earnings' ? earnings([uk.date]) : Promise.resolve([])]);
+  const today = cal || [];
+  console.log(`feeds took ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+  console.log(`prices: ${n.nq ? 'NQ ok' : 'NQ missing'}, ${n.tnx ? '10y ok' : '10y missing'}, ${n.dxy ? 'DXY ok' : 'DXY missing'} · headlines: ${news.length} · calendar: ${cal ? today.length + ' US events today (' + today.filter(e => e.actual).length + ' released)' : 'missing'} · big earnings: ${earn.length}`);
+  const toMin = t => +t.slice(0, 2) * 60 + +t.slice(3, 5), nowMin = toMin(uk.time);
+  const extra = { today: uk.date };
+  // result reports only run when something actually came out / reported - otherwise skip without using the AI
+  if (slot === 'post1' || slot === 'post2') {
+    const [a, b] = slot === 'post1' ? [toMin('12:25'), toMin('13:35')] : [toMin('14:40'), toMin('15:05')];
+    const due = today.filter(e => toMin(e.time) >= a && toMin(e.time) <= b);
+    if (cal && !due.length) { console.log('no US release in this window today - skipped'); return; }
+    extra.calendar = due; extra.calendarTitle = 'RELEASED (UK TIME)';
+  }
+  if (slot === 'earnings') {
+    const ah = earn.filter(e => /after/.test(e.when));
+    if (!ah.length) { console.log('no big NQ company reported after the close today - skipped'); return; }
+    extra.earnings = ah;
+  }
+  if (slot === 'morning') { extra.calendar = today; extra.calendarTitle = 'TODAY (UK TIME)'; extra.earnings = earn; }
+  if (slot === 'midday' || slot === 'preny') { extra.calendar = today.filter(e => toMin(e.time) > nowMin); extra.calendarTitle = 'STILL TO COME TODAY (UK TIME)'; }
+  if (!cal) delete extra.calendar;
+
   const system = fs.readFileSync(path.join(__dirname, 'prompt.md'), 'utf8');
-  const user = `Today is ${uk.weekday} ${uk.date}, UK time now ${uk.time}.\nReport type: ${slotTask(slot)}\n\nLatest prices (delayed, from a free feed; use these numbers rather than searching for prices):\n${numbersText(n)}\n\nToday's headlines (free news feeds):\n${news.map(h => '- ' + h).join('\n') || 'none'}\n\nSearch the web for today's news, calendar, forecasts and results. Then answer with the JSON object only.`;
+  const user = `Today is ${uk.weekday} ${uk.date}, UK time now ${uk.time}.\nReport type: ${slotTask(slot)}\n\n` +
+    `Latest prices (delayed, from a free feed; use these numbers):\n${numbersText(n)}\n\n` +
+    `US economic calendar today (UK time; "actual" = already released):\n${cal ? (calendarLines(today).join('\n').replace(/\*\*/g, '') || 'nothing medium/high today') : 'not available'}\n\n` +
+    (earn.length ? `Earnings of big Nasdaq-100 companies:\n${earningsLines(earn, uk.date).join('\n')}\n\n` : '') +
+    `Today's headlines (free news feeds):\n${news.map(h => '- ' + h).join('\n') || 'none'}\n\n` +
+    `Search the web if you can for anything missing (results, guidance, reactions). Then answer with the JSON object only.`;
   let embed;
   try {
     const r = parseJson(await callGemini(system, user));
     if (r.skip) { console.log('nothing to report for this slot today - skipped'); return; }
-    embed = buildEmbed(slot, r, n);
+    embed = buildEmbed(slot, r, n, extra);
   } catch (e) {
     console.log('AI report failed: ' + e.message);
     if (!['morning', 'midday', 'preny'].includes(slot)) return;
     embed = backupEmbed(slot, n);
   }
   await post(embed);
-})().catch(e => { console.error(e); process.exit(1); });
+})().then(() => process.exit(0), e => { console.error(e); process.exit(1); });

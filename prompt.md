@@ -24,10 +24,9 @@ Answer with ONE JSON object and nothing else, in this shape (leave out keys that
   "headline": "very short extra title, e.g. 'PCE cooler than expected' or 'Microsoft -4.8% after hours' (optional)",
   "result": ["for result reports: actual vs forecast, guidance, reaction"],
   "why": ["reasons for the bias"],
-  "calendar": [{"time_uk": "13:30", "impact": "high|medium|low", "event": "Retail Sales", "forecast": "+0.4%", "actual": ""}],
-  "earnings": [{"day": "Today|Tue|Wed...", "company": "Microsoft", "time_uk": "after close ~21:05", "expected_move": "±6%"}],
-  "watch": ["what to watch next"],
+  "watch": ["what to watch next, e.g. the next release and its forecast, or a big company reporting"],
   "change": ["what result would flip the bias, and to what"],
   "headlines": ["Source: short headline"]
 }
-Morning brief: include calendar (US high/medium impact only) and earnings for the rest of this week (largest Nasdaq-100 companies only; empty if none).
+The calendar and earnings lists are shown to readers separately (from data feeds), so do NOT repeat them as lists; use them in your reasoning, "watch" and "change".
+For data results, compare the released number with the expected one given in the request.

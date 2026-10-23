@@ -6,14 +6,21 @@ const fs = require('fs');
 const path = require('path');
 
 const SLOTS = {
-  morning:  { uk: '07:00', title: '🌅 MORNING BRIEF',        next: '13:00 UK' },
-  midday:   { uk: '13:00', title: '📊 MIDDAY',               next: 'after the 13:30 data, or 14:25 UK' },
-  post1:    { uk: '13:32', title: '⚡ DATA RESULT',          next: '14:25 UK' },
-  preny:    { uk: '14:25', title: '🔔 BEFORE THE NY OPEN',   next: 'after the 15:00 data, or 07:00 UK' },
-  post2:    { uk: '15:02', title: '⚡ DATA RESULT',          next: 'tonight if a big company reports, or 07:00 UK' },
-  earnings: { uk: '21:20', title: '📢 EARNINGS',             next: '07:00 UK' },
+  morning:  { uk: '07:00', title: 'ðŸŒ… MORNING BRIEF',        next: '13:00 UK' },
+  midday:   { uk: '13:00', title: 'ðŸ“Š MIDDAY',               next: 'after the 13:30 data, or 14:25 UK' },
+  post1:    { uk: '13:32', title: 'âš¡ DATA RESULT',          next: '14:25 UK' },
+  preny:    { uk: '14:25', title: 'ðŸ”” BEFORE THE NY OPEN',   next: 'after the 15:00 data, or 07:00 UK' },
+  post2:    { uk: '15:02', title: 'âš¡ DATA RESULT',          next: 'tonight if a big company reports, or 07:00 UK' },
+  earnings: { uk: '21:20', title: 'ðŸ“¢ EARNINGS',             next: '07:00 UK' },
 };
-const MODELS = (process.env.MODEL || 'gemini-3.8-flash,gemini-3.6-flash,gemini-2.5-flash').split(',');
+const MODELS = (process.env.MODEL || 'gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite').split(',');
+const FEEDS = [
+  'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114',
+  'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258',
+  'https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5ENDX&region=US&lang=en-US',
+  'https://news.google.com/rss/search?q=nasdaq+futures+when:1d&hl=en-US&gl=US&ceid=US:en',
+  'https://news.google.com/rss/search?q=fed+OR+inflation+OR+treasury+yields+when:1d&hl=en-US&gl=US&ceid=US:en',
+];
 const COLOR = { BULLISH: 0x3fb950, BEARISH: 0xf85149, NEUTRAL: 0xf0b232 };
 const DISCLAIMER = 'Educational market context only, not financial advice';
 
@@ -45,6 +52,21 @@ async function marketNumbers() {
   const [nq, tnx, dxy] = await Promise.all([quote('NQ=F'), quote('^TNX'), quote('DX-Y.NYB')]);
   return { nq, tnx, dxy };
 }
+// free news headlines (RSS titles from the last day), so the report still has news when web search isn't available
+async function headlines() {
+  const unesc = s => s.replace(/<!\[CDATA\[|\]\]>/g, '').replace(/&amp;/g, '&').replace(/&apos;|&#39;|&#x2019;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
+  const out = new Set();
+  await Promise.all(FEEDS.map(async u => {
+    try {
+      const t = await (await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0' } })).text();
+      for (const m of [...t.matchAll(/<item>([\s\S]*?)<\/item>/g)].slice(0, 10)) {
+        const title = (m[1].match(/<title>([\s\S]*?)<\/title>/) || [])[1], date = (m[1].match(/<pubDate>([\s\S]*?)<\/pubDate>/) || [])[1];
+        if (title && (!date || Date.now() - Date.parse(date) < 36 * 3600e3)) out.add(unesc(title));
+      }
+    } catch { }
+  }));
+  return [...out].slice(0, 40);
+}
 const sgn = (v, d = 0) => (v > 0 ? '+' : '') + v.toFixed(d);
 function numbersText(n) {
   const out = [];
@@ -65,23 +87,25 @@ function slotTask(slot) {
   }
 }
 
+// tries each model with Google web search first, then each model without it (the free tier may not allow search)
 async function callGemini(system, user) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error('GEMINI_API_KEY not set');
   let lastErr;
-  for (const model of MODELS) {
+  for (const search of [true, false]) for (const model of MODELS) {
+    const tag = `${model}${search ? ' + web search' : ' (no web search)'}`;
     try {
+      const body = { systemInstruction: { parts: [{ text: system }] }, generationConfig: { temperature: 0.3 },
+        contents: [{ role: 'user', parts: [{ text: search ? user : user + '\n\nWeb search is not available this time: work from the headlines above only, and leave out forecasts and calendar items you cannot see.' }] }] };
+      if (search) body.tools = [{ google_search: {} }];
       const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-        body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents: [{ role: 'user', parts: [{ text: user }] }],
-          tools: [{ google_search: {} }], generationConfig: { temperature: 0.3 } }),
-      });
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body) });
       const j = await r.json();
-      if (!r.ok) { lastErr = new Error(`${model}: ${r.status} ${JSON.stringify(j).slice(0, 300)}`); console.log(lastErr.message); continue; }
+      if (!r.ok) { lastErr = new Error(`${tag}: ${r.status}`); console.log(`${tag}: ${r.status} ${JSON.stringify(j.error || j).slice(0, 1500)}`); continue; }
       const text = (j.candidates?.[0]?.content?.parts || []).filter(p => p.text && !p.thought).map(p => p.text).join('\n');
-      if (text.trim()) { console.log('model used: ' + model); return text; }
-      lastErr = new Error(`${model}: empty answer`);
-    } catch (e) { lastErr = e; console.log(`${model}: ${e.message}`); }
+      if (text.trim()) { console.log('model used: ' + tag); return text; }
+      lastErr = new Error(`${tag}: empty answer`); console.log(lastErr.message);
+    } catch (e) { lastErr = e; console.log(`${tag}: ${e.message}`); }
   }
   throw lastErr;
 }
@@ -92,8 +116,8 @@ function parseJson(text) {
   return JSON.parse(text.slice(a, b + 1));
 }
 
-const cut = (s, n) => (s = String(s || '')).length > n ? s.slice(0, n - 1) + '…' : s;
-const impactIcon = i => /high/i.test(i) ? '🔴' : /med/i.test(i) ? '🟠' : '⚪';
+const cut = (s, n) => (s = String(s || '')).length > n ? s.slice(0, n - 1) + 'â€¦' : s;
+const impactIcon = i => /high/i.test(i) ? 'ðŸ”´' : /med/i.test(i) ? 'ðŸŸ ' : 'âšª';
 
 function buildEmbed(slot, r, n) {
   const bias = (r.bias || 'NEUTRAL').toUpperCase(), conf = (r.confidence || '').toUpperCase();
@@ -102,19 +126,19 @@ function buildEmbed(slot, r, n) {
   if (n.nq) nums.push(`**NQ** ${sgn(n.nq.chg)} pts`);
   if (n.tnx) nums.push(`**10y** ${n.tnx.px.toFixed(2)}% (${sgn(n.tnx.chg * 100)} bp)`);
   if (n.dxy) nums.push(`**DXY** ${n.dxy.px.toFixed(2)} (${sgn(n.dxy.pct, 2)}%)`);
-  if (nums.length && slot !== 'earnings') parts.push(nums.join(' · '));
-  if (r.result?.length) parts.push('**RESULT**\n' + r.result.map(x => '• ' + x).join('\n'));
-  if (r.why?.length) parts.push('**WHY**\n' + r.why.map(x => '• ' + x).join('\n'));
-  if (r.calendar?.length) parts.push('**TODAY (UK TIME)**\n' + r.calendar.map(c => `${c.time_uk || ''} ${impactIcon(c.impact)} ${c.event || ''}${c.forecast ? ` · forecast ${c.forecast}` : ''}${c.actual ? ` · actual **${c.actual}**` : ''}`).join('\n'));
-  if (r.earnings?.length) parts.push('**📅 EARNINGS (big NQ companies)**\n' + r.earnings.map(e => `${e.day || ''} · **${e.company || ''}** · ${e.time_uk || ''}${e.expected_move ? ` · expected move ${e.expected_move}` : ''}`).join('\n'));
-  if (r.watch?.length) parts.push('**WATCH**\n' + r.watch.map(x => '• ' + x).join('\n'));
-  if (r.change?.length) parts.push('**WHAT WOULD CHANGE IT**\n' + r.change.map(x => '• ' + x).join('\n'));
-  if (r.headlines?.length) parts.push('**HEADLINES**\n' + r.headlines.slice(0, 3).map(x => '• ' + x).join('\n'));
+  if (nums.length && slot !== 'earnings') parts.push(nums.join(' Â· '));
+  if (r.result?.length) parts.push('**RESULT**\n' + r.result.map(x => 'â€¢ ' + x).join('\n'));
+  if (r.why?.length) parts.push('**WHY**\n' + r.why.map(x => 'â€¢ ' + x).join('\n'));
+  if (r.calendar?.length) parts.push('**TODAY (UK TIME)**\n' + r.calendar.map(c => `${c.time_uk || ''} ${impactIcon(c.impact)} ${c.event || ''}${c.forecast ? ` Â· forecast ${c.forecast}` : ''}${c.actual ? ` Â· actual **${c.actual}**` : ''}`).join('\n'));
+  if (r.earnings?.length) parts.push('**ðŸ“… EARNINGS (big NQ companies)**\n' + r.earnings.map(e => `${e.day || ''} Â· **${e.company || ''}** Â· ${e.time_uk || ''}${e.expected_move ? ` Â· expected move ${e.expected_move}` : ''}`).join('\n'));
+  if (r.watch?.length) parts.push('**WATCH**\n' + r.watch.map(x => 'â€¢ ' + x).join('\n'));
+  if (r.change?.length) parts.push('**WHAT WOULD CHANGE IT**\n' + r.change.map(x => 'â€¢ ' + x).join('\n'));
+  if (r.headlines?.length) parts.push('**HEADLINES**\n' + r.headlines.slice(0, 3).map(x => 'â€¢ ' + x).join('\n'));
   return {
-    title: cut(`${SLOTS[slot].title}${r.headline ? ': ' + r.headline : ''} · NQ bias ${bias}${conf ? ' · confidence ' + conf : ''}`, 256),
+    title: cut(`${SLOTS[slot].title}${r.headline ? ': ' + r.headline : ''} Â· NQ bias ${bias}${conf ? ' Â· confidence ' + conf : ''}`, 256),
     description: cut(parts.join('\n\n'), 4000),
     color: COLOR[bias] ?? COLOR.NEUTRAL,
-    footer: { text: `${DISCLAIMER} · next report ${SLOTS[slot].next}` },
+    footer: { text: `${DISCLAIMER} Â· next report ${SLOTS[slot].next}` },
     timestamp: new Date().toISOString(),
   };
 }
@@ -127,9 +151,9 @@ function backupEmbed(slot, n) {
   if (n.dxy) { score -= Math.sign(n.dxy.chg); used++; }
   const bias = score >= 2 ? 'BULLISH' : score <= -2 ? 'BEARISH' : 'NEUTRAL';
   return {
-    title: `${SLOTS[slot].title} (basic) · NQ bias ${bias}`,
+    title: `${SLOTS[slot].title} (basic) Â· NQ bias ${bias}`,
     description: numbersText(n) + `\n\nRule: NQ up, yield down and dollar down each count bullish (opposite = bearish). Score ${sgn(score)} of ${used}.\nThe full AI report was not available this time.`,
-    color: COLOR[bias], footer: { text: `${DISCLAIMER} · next report ${SLOTS[slot].next}` }, timestamp: new Date().toISOString(),
+    color: COLOR[bias], footer: { text: `${DISCLAIMER} Â· next report ${SLOTS[slot].next}` }, timestamp: new Date().toISOString(),
   };
 }
 
@@ -146,10 +170,11 @@ async function post(embed) {
   const uk = ukNow();
   const slot = pickSlot(uk);
   if (!slot || !SLOTS[slot]) { console.log(`no report due (UK ${uk.time}, cron "${process.env.CRON || ''}") - other season's timer, exiting`); return; }
-  console.log(`report: ${slot} · UK ${uk.weekday} ${uk.date} ${uk.time}`);
-  const n = await marketNumbers();
+  console.log(`report: ${slot} Â· UK ${uk.weekday} ${uk.date} ${uk.time}`);
+  const [n, news] = await Promise.all([marketNumbers(), headlines()]);
+  console.log(`prices: ${n.nq ? 'NQ ok' : 'NQ missing'}, ${n.tnx ? '10y ok' : '10y missing'}, ${n.dxy ? 'DXY ok' : 'DXY missing'} Â· headlines: ${news.length}`);
   const system = fs.readFileSync(path.join(__dirname, 'prompt.md'), 'utf8');
-  const user = `Today is ${uk.weekday} ${uk.date}, UK time now ${uk.time}.\nReport type: ${slotTask(slot)}\n\nLatest prices (delayed, from a free feed; use these numbers rather than searching for prices):\n${numbersText(n)}\n\nSearch the web for today's news, calendar, forecasts and results. Then answer with the JSON object only.`;
+  const user = `Today is ${uk.weekday} ${uk.date}, UK time now ${uk.time}.\nReport type: ${slotTask(slot)}\n\nLatest prices (delayed, from a free feed; use these numbers rather than searching for prices):\n${numbersText(n)}\n\nToday's headlines (free news feeds):\n${news.map(h => '- ' + h).join('\n') || 'none'}\n\nSearch the web for today's news, calendar, forecasts and results. Then answer with the JSON object only.`;
   let embed;
   try {
     const r = parseJson(await callGemini(system, user));

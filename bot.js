@@ -345,11 +345,12 @@ async function newsCheck(uk) {
     await newsDesk(uk, desk);
   }
 }
+const weekendNY = () => ['Sat', 'Sun'].includes(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short' }).format(new Date()));
 async function newsDesk(uk, desk) {
   let st = { seen: {}, posted: [] };
   try { st = JSON.parse(fs.readFileSync(desk.state, 'utf8')); } catch { console.log(`${desk.label}: no saved state - first run`); }
   const now = Date.now(), firstRun = !Object.keys(st.seen).length;
-  const allNew = (await newsItems(desk.feeds, desk.trusted)).filter(x => !st.seen[x.id] && now - x.when < (firstRun ? 45 : 75) * 60e3)   // 2026-10-23: a 15:09 ET story reached the feed at 16:30 and was posted after a newer opposite one - older than 75 min = stale for traders.sort((a, b) => b.when - a.when);
+  const allNew = (await newsItems(desk.feeds, desk.trusted)).filter(x => !st.seen[x.id] && now - x.when < (firstRun ? 45 : weekendNY() ? 135 : 75) * 60e3)   // weekend checks are 2 h apart - 135 min so nothing falls in the gap   // 2026-10-23: a 15:09 ET story reached the feed at 16:30 and was posted after a newer opposite one - older than 75 min = stale for traders.sort((a, b) => b.when - a.when);
   for (const x of allNew) st.seen[x.id] = x.when;                                   // everything fetched counts as seen
   const fresh = allNew.slice(0, 60);
   console.log(`${desk.label}: ${allNew.length} new headlines${allNew.length > 60 ? ' (newest 60 checked)' : ''}`);

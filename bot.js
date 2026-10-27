@@ -461,6 +461,66 @@ async function newsCheck(uk) {
   // altcoin radar every 4 h: the first news check of 04/08/12/16 ET on weekdays, plus 00/20 ET at weekends (crypto never closes)
   const nyMin = +new Intl.DateTimeFormat('en-GB', { timeZone: 'America/New_York', minute: '2-digit' }).format(new Date());
   if (nyHr % 4 === 0 && nyMin < 15) await altRadar();
+  // news brief video every 4 h on weekdays (04 / 08 / 12 / 16 ET), after the desks have scored this check's headlines
+  if (nyHr % 4 === 0 && nyMin < 15 && !weekendNY()) {
+    try { await newsBrief(uk); }
+    catch (e) { console.log('news brief failed: ' + e.message); await alert(`⚠️ **news brief** ${et()} ET: the video failed (${cut(e.message, 300)}).`); }
+  }
+}
+
+// ---- NEWS BRIEF VIDEO (2026-10-27): ~1 min narrated video every 4 h -> #news-brief (secret NEWSBRIEF_WEBHOOK, mirror NEWSBRIEF_WEBHOOK_2) ----
+// Stories the three news desks scored 7+ in the last 4 h (highest first, max 4), NQ / gold / BTC / VIX / dollar, the real NQ 5-min chart.
+// The AI writes the spoken script from those facts only; if it fails, a plain script is built from the headlines.
+const BRIEF_SYSTEM = `You write the script of a short spoken market news brief (45-75 seconds when read aloud) for NQ (Nasdaq-100 futures) day traders. A voice reads it over headline cards.
+Use ONLY the stories and prices given. No advice, no predictions of your own, no "buy" or "sell".
+Order: 1) a one-line greeting with the weekday and date; 2) each story given, highest impact first - its spoken line starts with "Impact N." and says what happened and why it matters in one or two short sentences; 3) one line "on the board" with NQ, gold and bitcoin moves; 4) close with exactly "That's the brief. Next update in four hours."
+If no stories are given, say there was no major market-moving news in the last four hours, then the board and the close.
+Write numbers the way a presenter says them (e.g. "up four tenths of a percent", "near twenty-nine thousand six hundred").
+Answer with ONE JSON object only: {"segments":[{"say":"spoken text","card":"SHORT CARD TITLE, max 24 characters","sub":"one short line, max 45 characters","impact":7}]} - "impact" only on story segments (their score), omitted on the others.`;
+const words = (s, n) => { s = String(s || ''); if (s.length <= n) return s; const w = s.slice(0, n + 1).split(' '); w.pop(); return w.join(' ') || s.slice(0, n); };   // cut at a whole word
+async function newsBrief(uk) {
+  if (!hooks('NEWSBRIEF_WEBHOOK').length && process.env.DRY !== '1') { console.log('news brief: no NEWSBRIEF_WEBHOOK secret - skipped'); return; }
+  const now = Date.now(), stories = [];
+  for (const f of [STATE_FILE, CRYPTO_STATE, GOLD_STATE]) { try { stories.push(...(JSON.parse(fs.readFileSync(f, 'utf8')).brief || [])); } catch { } }
+  const seen = new Set(), top = stories.filter(s => now - s.t < 4 * 36e5 && s.score >= 7).sort((a, b) => b.score - a.score || b.t - a.t)
+    .filter(s => { const k = hash(s.h); if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 4);
+  const [nq, gold, btc, vix, dxy] = await Promise.all(['NQ=F', 'GC=F', 'BTC-USD', '^VIX', 'DX-Y.NYB'].map(quote));
+  let candles = [];
+  try {
+    const r = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/NQ%3DF?range=1d&interval=5m', { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(TIMEOUT.feed) });
+    const res = (await r.json()).chart.result[0], q = res.indicators.quote[0];
+    candles = res.timestamp.map((_, i) => ({ o: q.open[i], h: q.high[i], l: q.low[i], c: q.close[i], v: q.volume[i] })).filter(k => k.o > 0 && k.h > 0 && k.l > 0 && k.c > 0);
+  } catch (e) { console.log('news brief: no NQ candles - ' + e.message); }
+  const sg = v => (v >= 0 ? '+' : '') + v.toFixed(1) + '%', fmt = (v, d = 0) => v.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+  const ticker = [nq && `NQ ${fmt(nq.px)}  ${sg(nq.pct)}`, gold && `GOLD ${fmt(gold.px)}  ${sg(gold.pct)}`, btc && `BTC ${fmt(btc.px)}  ${sg(btc.pct)}`, vix && `VIX ${fmt(vix.px, 1)}`, dxy && `DXY ${fmt(dxy.px, 1)}`]
+    .filter(Boolean).join('     ') + `     ${DISCLAIMER}`;
+  const user = `Now: ${uk.weekday} ${uk.date}, ${et()} ET.\n\nStories (impact score / desk / headline / why):\n${top.map(s => `- ${s.score}/10 [${s.desk}] ${s.h}${s.why?.length ? ' - ' + s.why.join(' ') : ''}`).join('\n') || 'none'}\n\n`
+    + `Prices: ${[nq && `NQ ${fmt(nq.px)} (${sg(nq.pct)})`, gold && `gold $${fmt(gold.px)} (${sg(gold.pct)})`, btc && `bitcoin $${fmt(btc.px)} (${sg(btc.pct)})`, vix && `VIX ${fmt(vix.px, 1)}`, dxy && `dollar index ${fmt(dxy.px, 1)} (${sg(dxy.pct)})`].filter(Boolean).join(', ')}`;
+  let segments;
+  try { segments = parseJson(await callGemini(BRIEF_SYSTEM, user, false, NEWS_MODELS)).segments; if (!Array.isArray(segments) || segments.length < 2) throw new Error('no segments'); }
+  catch (e) {   // plain script from the facts
+    console.log('news brief: AI script failed (' + e.message + ') - using the plain script');
+    segments = [{ say: `Here's your market brief for ${uk.weekday}.`, card: 'MARKET BRIEF', sub: `${uk.weekday} ${uk.date}` },
+      ...top.map(s => ({ say: `Impact ${s.score}. ${s.h}.`, card: words(s.h.toUpperCase(), 24), sub: words((s.why || [])[0] || '', 45), impact: s.score })),
+      ...(top.length ? [] : [{ say: 'No major market-moving news in the last four hours.', card: 'QUIET 4 HOURS', sub: 'No 7+ impact stories' }]),
+      { say: [nq && `Nasdaq futures ${nq.pct >= 0 ? 'up' : 'down'} ${Math.abs(nq.pct).toFixed(1)} percent.`, gold && `Gold ${gold.pct >= 0 ? 'up' : 'down'} ${Math.abs(gold.pct).toFixed(1)} percent.`, btc && `Bitcoin ${btc.pct >= 0 ? 'up' : 'down'} ${Math.abs(btc.pct).toFixed(1)} percent.`].filter(Boolean).join(' ') + " That's the brief. Next update in four hours.",
+        card: nq ? `NQ ${sg(nq.pct)}` : 'ON THE BOARD', sub: [gold && `GOLD $${fmt(gold.px)}`, btc && `BTC $${fmt(btc.px)}`].filter(Boolean).join('   ') }];
+  }
+  const { makeBrief } = require('./brief.js');
+  const file = await makeBrief({ segments, ticker, candles, last: nq?.px || 0, outDir: path.join(__dirname, 'brief_out') });
+  const content = `🎙️ **MARKET BRIEF · ${et()} ET**${top.length ? '\n' + top.map(s => `${s.score >= 8 ? '🚨' : '⚠️'} ${s.score}/10 · ${s.h}`).join('\n') : '\nNo 7+ impact stories in the last 4 hours.'}\n-# ${DISCLAIMER}`;
+  if (process.env.DRY === '1') { console.log('news brief (dry run): ' + file + '\n' + content); return; }
+  const list = hooks('NEWSBRIEF_WEBHOOK'), buf = fs.readFileSync(file);
+  for (let k = 0; k < list.length; k++) {
+    try {
+      const form = new FormData();
+      form.append('payload_json', JSON.stringify({ username: 'MARKET BRIEF', content: cut(content, 1900) }));
+      form.append('files[0]', new Blob([buf], { type: 'video/mp4' }), `market_brief_${uk.date}_${et().replace(':', '')}.mp4`);
+      const r = await fetch(list[k], { method: 'POST', body: form, signal: AbortSignal.timeout(120e3) });
+      if (!r.ok) throw new Error(`Discord ${r.status} ${await r.text()}`);
+    } catch (e) { if (k === 0) throw e; console.log('news brief: second channel failed: ' + e.message); }
+  }
+  console.log(`news brief posted: ${top.length} stories`);
 }
 
 // ---- ALTCOIN RADAR (2026-10-27): which coins outside the blue chips are making headlines -> #altcoin-radar (secret ALTCOIN_WEBHOOK, mirror ALTCOIN_WEBHOOK_2) ----
@@ -573,7 +633,11 @@ async function newsDesk(uk, desk) {
       st.posted.push({ t: now, h: s.headline });
       console.log(`${desk.label} posted: ${s.score}/10 ${s.headline}`);
     }
+    // 2026-10-27: every story scoring 7+ (posted or not) is kept 6 h for the 4-hourly NEWS BRIEF video
+    for (const s of (res.stories || []).filter(s => s.score >= 7))
+      (st.brief = st.brief || []).push({ t: now, score: s.score, h: s.headline, why: (s.why || []).slice(0, 2), desk: desk.label });
   }
+  st.brief = (st.brief || []).filter(b => now - b.t < 6 * 36e5);
   fs.writeFileSync(desk.state, JSON.stringify(st));
 }
 
@@ -588,7 +652,7 @@ async function healthCheck(uk) {
   const repo = process.env.GITHUB_REPOSITORY, gh = { Authorization: `Bearer ${process.env.GITHUB_TOKEN}`, Accept: 'application/vnd.github+json', 'User-Agent': 'fundamentals-bot' };
   const api = async p => { const r = await fetch('https://api.github.com/repos/' + repo + p, { headers: gh, signal: AbortSignal.timeout(TIMEOUT.feed) }); if (!r.ok) throw new Error(`GitHub ${r.status} ${p}`); return r; };
   const runs = (await (await api(`/actions/runs?created=%3E%3D${uk.date}&per_page=100`)).json()).workflow_runs || [];
-  const seen = {}, lines = [], news = { runs: 0, posted: 0, failed: 0, scores: [] }, crypto = { posted: 0, failed: 0, scores: [] }, goldNews = { posted: 0, failed: 0, scores: [] }, goldRep = [], radarPosts = [];
+  const seen = {}, lines = [], news = { runs: 0, posted: 0, failed: 0, scores: [] }, crypto = { posted: 0, failed: 0, scores: [] }, goldNews = { posted: 0, failed: 0, scores: [] }, goldRep = [], radarPosts = [], briefPosts = [];
   for (const run of runs.sort((a, b) => a.created_at.localeCompare(b.created_at))) {
     if (run.id === +process.env.GITHUB_RUN_ID) continue;
     const jobs = (await (await api(`/actions/runs/${run.id}/jobs`)).json()).jobs || [];
@@ -599,6 +663,7 @@ async function healthCheck(uk) {
       for (const m of log.matchAll(/(?<!gold )news posted: (\d+)\/10/g)) { news.posted++; news.scores.push(+m[1]); }
       for (const m of log.matchAll(/gold news posted: (\d+)\/10/g)) { goldNews.posted++; goldNews.scores.push(+m[1]); }
       for (const m of log.matchAll(/altcoin radar posted: (\d+) coins/g)) radarPosts.push(+m[1]);
+      for (const m of log.matchAll(/news brief posted: (\d+) stories/g)) briefPosts.push(+m[1]);
       if (/gold news AI failed/.test(log)) goldNews.failed++;
       for (const m of log.matchAll(/crypto posted: (\d+)\/10/g)) { crypto.posted++; crypto.scores.push(+m[1]); }
       if (/crypto AI failed/.test(log)) crypto.failed++;
@@ -632,6 +697,7 @@ async function healthCheck(uk) {
   if (news.runs) lines.push(`${news.failed ? '⚠️' : '📰'} **news**: ${news.runs} checks, ${news.posted} posted${news.scores.length ? ' (scores ' + news.scores.join(', ') + ')' : ''}${news.failed ? `, ${news.failed} failed` : ''}`);
   if (news.runs) lines.push(`${crypto.failed ? '⚠️' : '🪙'} **crypto news**: ${crypto.posted} posted${crypto.scores.length ? ' (scores ' + crypto.scores.join(', ') + ')' : ''}${crypto.failed ? `, ${crypto.failed} checks failed` : ''}`);
   if (radarPosts.length) lines.push(`🔥 **altcoin radar**: ${radarPosts.length} posted (${radarPosts.join(', ')} coins)`);
+  if (briefPosts.length || process.env.NEWSBRIEF_WEBHOOK) lines.push(`${briefPosts.length ? '🎙️' : '⚠️'} **news brief videos**: ${briefPosts.length} posted${briefPosts.length ? ' (' + briefPosts.join(', ') + ' stories)' : ' (expected 4 on a weekday)'}`);
   if (news.runs && process.env.GOLD_NEWS_WEBHOOK) lines.push(`${goldNews.failed ? '⚠️' : '🥇'} **gold news**: ${goldNews.posted} posted${goldNews.scores.length ? ' (scores ' + goldNews.scores.join(', ') + ')' : ''}${goldNews.failed ? `, ${goldNews.failed} checks failed` : ''}`);
   if (goldRep.length) lines.push(`🥇 **gold reports**: ${goldRep.join(' · ')}`);
   const bad = lines.filter(l => /^(❌|⚠️|❓)/.test(l) && !/manual test/.test(l)).length;
@@ -643,6 +709,9 @@ async function healthCheck(uk) {
   const uk = ukNow();
   const slot = pickSlot(uk);
   if (slot === 'radar') { for (const f of [STATE_FILE, CRYPTO_STATE, GOLD_STATE, REPORT_STATE, GOLD_REPORT_STATE]) try { fs.unlinkSync(f); } catch { } status.slot = 'radar'; await altRadar(); return; }   // manual test of the altcoin radar
+  if (slot === 'brief') {   // manual test of the news brief video: reads the saved 7+ stories, then removes the state files so this run saves nothing
+    status.slot = 'brief'; try { await newsBrief(uk); } finally { for (const f of [STATE_FILE, CRYPTO_STATE, GOLD_STATE, REPORT_STATE, GOLD_REPORT_STATE]) try { fs.unlinkSync(f); } catch { } } return;
+  }
   if (!slot || (!SLOTS[slot] && slot !== 'news')) { console.log(`no report due (UK ${uk.time}, cron "${process.env.CRON || ''}") - other season's timer, exiting`); return; }
   if (slot === 'health') { for (const f of [STATE_FILE, CRYPTO_STATE, GOLD_STATE, REPORT_STATE, GOLD_REPORT_STATE]) try { fs.unlinkSync(f); } catch { } console.log('health check started'); await healthCheck(uk); return; }
   // each kind of run only saves its own state file (the other is deleted so the cache step skips it - avoids overwriting newer state)

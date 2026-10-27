@@ -54,6 +54,13 @@ jobs:
           DISCORD_WEBHOOK_2: ${{ secrets.DISCORD_WEBHOOK_2 }}
           NEWS_WEBHOOK_2: ${{ secrets.NEWS_WEBHOOK_2 }}
           CRYPTO_WEBHOOK_2: ${{ secrets.CRYPTO_WEBHOOK_2 }}
+          # third server: all six channels
+          DISCORD_WEBHOOK_3: ${{ secrets.DISCORD_WEBHOOK_3 }}
+          GOLD_NEWS_WEBHOOK_3: ${{ secrets.GOLD_NEWS_WEBHOOK_3 }}
+          NEWS_WEBHOOK_3: ${{ secrets.NEWS_WEBHOOK_3 }}
+          CRYPTO_WEBHOOK_3: ${{ secrets.CRYPTO_WEBHOOK_3 }}
+          ALTCOIN_WEBHOOK_3: ${{ secrets.ALTCOIN_WEBHOOK_3 }}
+          NEWSBRIEF_WEBHOOK_3: ${{ secrets.NEWSBRIEF_WEBHOOK_3 }}
           # second server: gold reports (mainly gold + short dollar/FX view) and gold news
           GOLD_WEBHOOK: ${{ secrets.GOLD_WEBHOOK }}
           GOLD_NEWS_WEBHOOK: ${{ secrets.GOLD_NEWS_WEBHOOK }}

@@ -187,7 +187,8 @@ function slotTask(slot, d) {
 // were using them up, so the news desks start with the small model and the two big ones are kept for the NQ / gold reports (~10 a day).
 const NEWS_MODELS = (process.env.NEWS_MODEL || 'gemini-3.5-flash-lite,gemini-3.6-flash').split(',');
 const exhausted = new Set();   // models that hit their DAILY limit in this run - not asked again
-async function callGemini(system, user, trySearch = true, models = MODELS) {
+// json = true: Google returns strict JSON (2026-10-27: flash-lite once sent a broken array - "Expected ',' or ']'" - and 14 headlines went unchecked)
+async function callGemini(system, user, trySearch = true, models = MODELS, json = false) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error('GEMINI_API_KEY not set');
   let lastErr;
@@ -199,7 +200,7 @@ async function callGemini(system, user, trySearch = true, models = MODELS) {
     const search = round === true;
     const tag = `${model}${search ? ' + web search' : ' (no web search)'}`;
     try {
-      const body = { systemInstruction: { parts: [{ text: system }] }, generationConfig: { temperature: 0.3 },
+      const body = { systemInstruction: { parts: [{ text: system }] }, generationConfig: { temperature: 0.3, ...(json && !search ? { responseMimeType: 'application/json' } : {}) },
         contents: [{ role: 'user', parts: [{ text: search ? user : user + '\n\nWeb search is not available this time: work from the headlines above only, and leave out forecasts and calendar items you cannot see.' }] }] };
       if (search) body.tools = [{ google_search: {} }];
       const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
@@ -497,7 +498,7 @@ async function newsBrief(uk) {
   const user = `Now: ${uk.weekday} ${uk.date}, ${et()} ET.\n\nStories (impact score / desk / headline / why):\n${top.map(s => `- ${s.score}/10 [${s.desk}] ${s.h}${s.why?.length ? ' - ' + s.why.join(' ') : ''}`).join('\n') || 'none'}\n\n`
     + `Prices: ${[nq && `NQ ${fmt(nq.px)} (${sg(nq.pct)})`, gold && `gold $${fmt(gold.px)} (${sg(gold.pct)})`, btc && `bitcoin $${fmt(btc.px)} (${sg(btc.pct)})`, vix && `VIX ${fmt(vix.px, 1)}`, dxy && `dollar index ${fmt(dxy.px, 1)} (${sg(dxy.pct)})`].filter(Boolean).join(', ')}`;
   let segments;
-  try { segments = parseJson(await callGemini(BRIEF_SYSTEM, user, false, NEWS_MODELS)).segments; if (!Array.isArray(segments) || segments.length < 2) throw new Error('no segments'); }
+  try { segments = parseJson(await callGemini(BRIEF_SYSTEM, user, false, NEWS_MODELS, true)).segments; if (!Array.isArray(segments) || segments.length < 2) throw new Error('no segments'); }
   catch (e) {   // plain script from the facts
     console.log('news brief: AI script failed (' + e.message + ') - using the plain script');
     segments = [{ say: `Here's your market brief for ${uk.weekday}.`, card: 'MARKET BRIEF', sub: `${uk.weekday} ${uk.date}` },
@@ -615,7 +616,7 @@ async function newsDesk(uk, desk) {
   if (fresh.length) {
     const user = `New York time now ${uk.weekday} ${uk.date} ${et()} ET.\n\nAlready posted in the last 24 h (do not repeat):\n${st.posted.map(p => `- ${et(new Date(p.t))} ET: ${p.h}`).join('\n') || 'none'}\n\nNew headlines:\n${fresh.map(x => `[${x.id}] ${et(new Date(x.when))} ET: ${x.title}${x.src ? ' (' + x.src + ')' : ''}`).join('\n')}`;
     let res;
-    try { res = parseJson(await callGemini(desk.system, user, false, NEWS_MODELS)); }
+    try { res = parseJson(await callGemini(desk.system, user, false, NEWS_MODELS, true)); }
     catch (e) { console.log(`${desk.label} AI failed: ` + e.message); await alert(`⚠️ **${desk.label}** ${et()} ET: the AI check failed (${cut(e.message, 200)}) - ${fresh.length} headlines not checked.`); for (const x of fresh) delete st.seen[x.id]; res = { stories: [] }; }
     const arrow = v => v === 'up' ? '🟢' : v === 'down' ? '🔴' : '⚪';
     for (const s of (res.stories || []).filter(s => s.score >= NEWS_MIN).sort((a, b) => b.score - a.score).slice(0, 2)) {   // 2026-10-23: 31 posts in a day was too many - at most 2 per check

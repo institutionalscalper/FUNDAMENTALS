@@ -11,7 +11,7 @@ on:
         required: true
         default: morning
         type: choice
-        options: [morning, midday, post1, preny, post2, earnings, health, news, radar, auto]
+        options: [morning, midday, post1, preny, post2, earnings, health, news, radar, brief, auto]
 
 permissions:
   actions: read      # lets the health check read today's runs and logs
@@ -20,7 +20,7 @@ permissions:
 jobs:
   report:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20   # the 4-hourly news brief video needs a few extra minutes
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -61,6 +61,9 @@ jobs:
           # altcoin radar (every 4 h) - main server + second server
           ALTCOIN_WEBHOOK: ${{ secrets.ALTCOIN_WEBHOOK }}
           ALTCOIN_WEBHOOK_2: ${{ secrets.ALTCOIN_WEBHOOK_2 }}
+          # news brief video every 4 h (weekdays) - main server
+          NEWSBRIEF_WEBHOOK: ${{ secrets.NEWSBRIEF_WEBHOOK }}
+          NEWSBRIEF_WEBHOOK_2: ${{ secrets.NEWSBRIEF_WEBHOOK_2 }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CRON: ${{ github.event.schedule }}
           SLOT: ${{ github.event.inputs.slot }}

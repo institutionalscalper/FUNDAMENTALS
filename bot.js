@@ -326,8 +326,8 @@ function backupEmbed(slot, n, d) {
   };
 }
 
-// 2026-10-25: every channel can be mirrored to a second channel (e.g. another server): secret <NAME>_2 next to <NAME>
-const hooks = name => [process.env[name], process.env[name + '_2']].filter(Boolean);
+// 2026-10-25: every channel can be mirrored to a second channel (e.g. another server): secret <NAME>_2 next to <NAME>; 2026-10-27: _3 = third server
+const hooks = name => [process.env[name], process.env[name + '_2'], process.env[name + '_3']].filter(Boolean);
 async function post(embed, webhook = hooks('DISCORD_WEBHOOK'), username = 'FUNDAMENTALS') {
   const body = { username, embeds: [embed] };
   if (process.env.DRY === '1') { console.log(JSON.stringify(body, null, 2)); return; }

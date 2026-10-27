@@ -80,15 +80,15 @@ async function makeBrief({ segments, ticker, candles, last, outDir }) {
   const tf = (name, txt) => { fs.writeFileSync(P(name), txt); return name; };
   const B = ffFont(FONT_B), R = ffFont(FONT_R), dt = [];
   segments.forEach((s, i) => {
-    const [a] = times[i], end = i + 1 < segments.length ? times[i + 1][0] - 0.05 : total, en = `enable='between(t,${a.toFixed(2)},${end.toFixed(2)})'`;
-    const al = `alpha='if(lt(t\\,${a.toFixed(2)}+0.35)\\,(t-${a.toFixed(2)})/0.35\\,1)'`;
+    const a = i === 0 ? 0 : times[i][0], end = i + 1 < segments.length ? times[i + 1][0] - 0.05 : total, en = `enable='between(t,${a.toFixed(2)},${end.toFixed(2)})'`;
+    const al = i === 0 ? `alpha=1` : `alpha='if(lt(t\\,${a.toFixed(2)}+0.35)\\,(t-${a.toFixed(2)})/0.35\\,1)'`;   // the first card is on from frame 1 (Discord's preview)
     if (s.impact >= 7) { dt.push(`drawbox=x=86:y=178:w=250:h=42:color=${s.impact >= 8 ? '0xe5534b' : '0xf0a030'}@1:t=fill:${en}`);
       dt.push(`drawtext=fontfile='${B}':expansion=none:textfile=${tf(`imp${i}.txt`, `HIGH IMPACT  ${s.impact}/10`)}:fontsize=22:fontcolor=white:x=98:y=188:${en}`); }
     const card = String(s.card || '').toUpperCase().slice(0, 30), sub = String(s.sub || '').slice(0, 60);
     dt.push(`drawtext=fontfile='${B}':expansion=none:textfile=${tf(`card${i}.txt`, card)}:fontsize=${Math.min(48, Math.floor(450 / Math.max(1, card.length * 0.62)))}:fontcolor=white:x=86:y=240:${al}:${en}`);
     dt.push(`drawtext=fontfile='${R}':expansion=none:textfile=${tf(`sub${i}.txt`, sub)}:fontsize=${Math.min(30, Math.floor(950 / Math.max(1, sub.length)))}:fontcolor=0x9fe8cf:x=88:y=330:${al}:${en}`);
   });
-  dt.push(`drawtext=fontfile='${B}':expansion=none:textfile=${tf('ticker.txt', ticker)}:fontsize=26:fontcolor=white:y=671:x='190+(w-190)-mod(t*110\\,(w-190)+tw)'`);
+  dt.push(`drawtext=fontfile='${B}':expansion=none:textfile=${tf('ticker.txt', ticker)}:fontsize=26:fontcolor=white:y=671:x='w-mod(t*110+(w-190)\\,(w-190)+tw)'`);   // starts beside the crest (Discord's preview is the first frame), then scrolls
   dt.push(`drawbox=x=0:y=653:w=170:h=67:color=0x03070b@1:t=fill`, `drawbox=x=168:y=653:w=3:h=67:color=0x38f2b6@1:t=fill`);
   const fc = `[0:v]${dt.join(',')}[d];[2:v]scale=-1:62[lg];[d][lg]overlay=x='(168-w)/2':y=656[v]`;
   ff(['-loop', '1', '-framerate', String(FPS), '-i', 'bg.png', '-i', 'voice.wav', '-loop', '1', '-framerate', String(FPS), '-i', path.join(__dirname, 'brief_logo.png'),

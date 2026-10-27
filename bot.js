@@ -458,6 +458,88 @@ async function newsCheck(uk) {
     if (!hooks(desk.webhook).length && process.env.DRY !== '1') { console.log(`${desk.label}: no ${desk.webhook} secret - skipped`); continue; }
     await newsDesk(uk, desk);
   }
+  // altcoin radar every 4 h: the first news check of 04/08/12/16 ET on weekdays, plus 00/20 ET at weekends (crypto never closes)
+  const nyMin = +new Intl.DateTimeFormat('en-GB', { timeZone: 'America/New_York', minute: '2-digit' }).format(new Date());
+  if (nyHr % 4 === 0 && nyMin < 15) await altRadar();
+}
+
+// ---- ALTCOIN RADAR (2026-10-27): which coins outside the blue chips are making headlines -> #altcoin-radar (secret ALTCOIN_WEBHOOK, mirror ALTCOIN_WEBHOOK_2) ----
+// No AI: crypto headlines of the last 4 h, matched against CoinGecko's top 500 coins (name, or ticker in CAPITALS / with $), the same story on
+// several sites counted once, price-prediction / promo pieces dropped, ranked by stories (trusted outlets count double). Plus CoinGecko trending.
+const RADAR_HOURS = 4;
+const BLUE_CHIPS = new Set(['btc', 'eth', 'bnb', 'sol', 'xrp', 'usdt', 'usdc', 'dai', 'usde', 'fdusd', 'tusd', 'pyusd', 'usds', 'usd1', 'wbtc', 'steth', 'weth', 'wsteth', 'weeth', 'cbbtc', 'reth', 'wbeth', 'bsc-usd', 'susde', 'buidl']);
+const RADAR_FEEDS = [
+  ...CRYPTO_FEEDS.filter(u => !u.includes('news.google.com')),
+  ...['altcoin', 'token surges OR token plunges OR token rallies', 'memecoin OR meme coin', 'crypto hack OR exploit OR drained', 'token listing Binance OR Coinbase OR Upbit OR Robinhood',
+    'crypto airdrop OR token unlock', 'altcoin ETF', 'crypto token partnership OR mainnet launch'].map(q => `https://news.google.com/rss/search?q=${encodeURIComponent(q)}+when:${RADAR_HOURS}h&hl=en-US&gl=US&ceid=US:en`),
+];
+const RADAR_JUNK = /price prediction|price analysis|price forecast|technical analysis|could (rally|hit|reach|soar|explode)|will .* (hit|reach) \$|top \d+ (coins|altcoins|tokens)|best (crypto|altcoins?|coins?) to buy|presale|next 100x|1000x|sponsored|press release/i;
+// coin names that are ordinary words / companies (only their ticker in CAPITALS counts, never the word)
+const RADAR_COMMON = /^(the|ai|one|ton|link|uni|gas|key|act|ape|pump|sun|moon|core|safe|beam|blur|flow|rose|mask|bone|super|magic|ark|hot|win|any|me|my|ok|pol|s|w|io|ip|vet|bat|cat|dog|pepe|strategy|story|sonic|render|maker|celestia|kaia|degen|zora|virtual|movement|polygon|cronos|quant|aster|plume|world|bitcoin|ethereum|usual|lido|sky|jupiter|ethena|morpho|aave|maple|pi|ondo|stacks|theta|helium|arweave|walrus|layerzero)$/i;
+const RADAR_STATE_NOTE = 'Attention, not direction: coins often make headlines after the price has already moved';
+async function altRadar() {
+  if (!hooks('ALTCOIN_WEBHOOK').length && process.env.DRY !== '1') { console.log('altcoin radar: no ALTCOIN_WEBHOOK secret - skipped'); return; }
+  console.log('altcoin radar started');
+  const unesc = s => s.replace(/<!\[CDATA\[|\]\]>/g, '').replace(/&amp;/g, '&').replace(/&apos;|&#39;|&#x2019;|&#8217;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
+  const heads = new Map();
+  await Promise.all(RADAR_FEEDS.map(async u => {
+    try {
+      const t = await (await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(TIMEOUT.feed) })).text();
+      for (const m of t.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
+        const g = k => unesc((m[1].match(new RegExp(`<${k}[^>]*>([\\s\\S]*?)<\\/${k}>`)) || [])[1] || '');
+        const when = Date.parse(g('pubDate')); if (!(when > 0) || Date.now() - when > RADAR_HOURS * 3600e3) continue;
+        const src = g('source') || [['coindesk', 'CoinDesk'], ['cointelegraph', 'Cointelegraph'], ['theblock', 'The Block'], ['decrypt', 'Decrypt']].find(([k]) => u.includes(k))?.[1] || '';
+        const title = g('title').replace(/\s+-\s+[^-]{2,40}$/, '');
+        if (!title || RADAR_JUNK.test(title) || /openPR|GlobeNewswire|PR Newswire|PRNewswire|Accesswire|EIN Presswire|Business Wire|Newsfile/i.test(src)) continue;   // press-release sites = paid promotion
+        heads.set(title.toLowerCase(), { title, src: src.replace(/^www\./, ''), link: g('link'), when });
+      }
+    } catch { }
+  }));
+  const H = [...heads.values()];
+  let coins = [], trending = [];
+  try {
+    for (const p of [1, 2]) coins.push(...await getJson(`https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=${p}&price_change_percentage=24h`));
+    trending = ((await getJson('https://api.coingecko.com/api/v3/search/trending')).coins || []).map(c => ({ sym: c.item.symbol, ch: c.item.data?.price_change_percentage_24h?.usd }));
+  } catch (e) { console.log('altcoin radar: CoinGecko failed - ' + e.message); }
+  console.log(`altcoin radar: ${H.length} headlines, ${coins.length} coins, ${trending.length} trending`);
+  if (!coins.length) { await alert(`⚠️ **altcoin radar** ${et()} ET: CoinGecko coin list not available - nothing posted.`); return; }
+  // the same story on several sites = one story (titles sharing most of their words)
+  const words = s => new Set(s.toLowerCase().replace(/[^a-z0-9$ ]/g, ' ').split(/\s+/).filter(w => w.length > 2));
+  const same = (a, b) => { const A = words(a), B = words(b); let k = 0; for (const w of A) if (B.has(w)) k++; return k / Math.max(1, Math.min(A.size, B.size)) >= 0.6; };
+  const res = [];
+  for (const c of coins) {
+    const sym = String(c.symbol).toLowerCase(); if (BLUE_CHIPS.has(sym) || /wrapped|bridged|staked|tokenized|xstock/i.test(c.name)) continue;
+    const name = c.name.replace(/\s*\(.*\)/, '');
+    const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const nameRe = name.length >= 4 && !RADAR_COMMON.test(name) ? new RegExp(`\\b${esc(name)}\\b`, 'i') : null;
+    const symRe = sym.length >= 3 && !/^(the|for|and|now|new|top|big|all|eth|usd|ceo|etf|sec|ftx|nft|ai)$/.test(sym) ? new RegExp(`(\\$${esc(sym)}\\b|\\b${esc(c.symbol.toUpperCase())}\\b)`) : null;
+    const hits = H.filter(h => (nameRe && nameRe.test(h.title)) || (symRe && symRe.test(h.title))).sort((a, b) => b.when - a.when);
+    if (!hits.length) continue;
+    const stories = [];
+    for (const h of hits) { const s = stories.find(x => same(x.title, h.title)); if (s) s.more.add(h.src); else stories.push({ ...h, more: new Set() }); }
+    const trusted = stories.filter(s => CRYPTO_TRUSTED.test(s.src) || [...s.more].some(o => CRYPTO_TRUSTED.test(o))).length;
+    res.push({ sym: c.symbol.toUpperCase(), name, stories, score: stories.length + trusted, ch: c.price_change_percentage_24h, rank: c.market_cap_rank,
+      trend: trending.findIndex(t => String(t.sym).toLowerCase() === sym) + 1 });
+  }
+  res.sort((a, b) => b.score - a.score || b.stories.length - a.stories.length || a.rank - b.rank);
+  const pct = v => v == null ? '' : `${v > 0 ? '+' : ''}${v.toFixed(1)}%`;
+  const ago = t => { const m = Math.round((Date.now() - t) / 60e3); return m < 60 ? `${m} min ago` : `${Math.round(m / 60)} h ago`; };
+  const block = (r, i) => {
+    const head = `**${i + 1}. ${r.sym}${r.name.toUpperCase() !== r.sym ? ' · ' + r.name : ''}** · ${r.stories.length} stor${r.stories.length > 1 ? 'ies' : 'y'}` +
+      `${r.trend ? ` · 🔍 trending #${r.trend}` : ''}${r.ch != null ? ` · ${pct(r.ch)} 24h ${r.ch >= 0 ? '🟢' : '🔴'}` : ''} · rank #${r.rank}${r.rank > 200 ? ' · small cap ⚠️' : ''}`;
+    const lines = r.stories.slice(0, 3).map(s => `• ${s.link ? `[${cut(s.title, 110)}](${s.link})` : cut(s.title, 110)} — ${s.src || '?'}${s.more.size ? ` (+${s.more.size} more outlet${s.more.size > 1 ? 's' : ''})` : ''} · ${ago(s.when)}`);
+    if (r.stories.length > 3) lines.push(`• +${r.stories.length - 3} more`);
+    return head + '\n' + lines.join('\n');
+  };
+  const GAP = '\n​\n​\n';   // user: "a little bit more" gap between coins - two invisible lines
+  const tr = trending.filter(t => !BLUE_CHIPS.has(String(t.sym).toLowerCase())).slice(0, 7).map(t => `${String(t.sym).toUpperCase()}${t.ch != null ? ' ' + pct(t.ch) : ''}`).join(' · ');
+  const tail = tr ? `${GAP}**🔍 MOST SEARCHED ON COINGECKO**\n${tr}` : '';
+  let desc = '', shown = 0;
+  for (let i = 0; i < Math.min(res.length, 8); i++) { const add = (shown ? GAP : '') + block(res[i], i); if ((desc + add + tail).length > 3900) break; desc += add; shown++; }
+  if (!shown) desc = 'No altcoin made the headlines in the last 4 h.';
+  await post({ title: `🔥 ALTCOINS IN THE NEWS · last ${RADAR_HOURS} h`, description: desc + tail, color: 0xf0b232,
+    footer: { text: `${RADAR_STATE_NOTE} · ${DISCLAIMER}` }, timestamp: new Date().toISOString() }, hooks('ALTCOIN_WEBHOOK'), 'ALTCOIN RADAR');
+  console.log(`altcoin radar posted: ${shown} coins`);
 }
 const weekendNY = () => ['Sat', 'Sun'].includes(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short' }).format(new Date()));
 async function newsDesk(uk, desk) {
@@ -506,7 +588,7 @@ async function healthCheck(uk) {
   const repo = process.env.GITHUB_REPOSITORY, gh = { Authorization: `Bearer ${process.env.GITHUB_TOKEN}`, Accept: 'application/vnd.github+json', 'User-Agent': 'fundamentals-bot' };
   const api = async p => { const r = await fetch('https://api.github.com/repos/' + repo + p, { headers: gh, signal: AbortSignal.timeout(TIMEOUT.feed) }); if (!r.ok) throw new Error(`GitHub ${r.status} ${p}`); return r; };
   const runs = (await (await api(`/actions/runs?created=%3E%3D${uk.date}&per_page=100`)).json()).workflow_runs || [];
-  const seen = {}, lines = [], news = { runs: 0, posted: 0, failed: 0, scores: [] }, crypto = { posted: 0, failed: 0, scores: [] }, goldNews = { posted: 0, failed: 0, scores: [] }, goldRep = [];
+  const seen = {}, lines = [], news = { runs: 0, posted: 0, failed: 0, scores: [] }, crypto = { posted: 0, failed: 0, scores: [] }, goldNews = { posted: 0, failed: 0, scores: [] }, goldRep = [], radarPosts = [];
   for (const run of runs.sort((a, b) => a.created_at.localeCompare(b.created_at))) {
     if (run.id === +process.env.GITHUB_RUN_ID) continue;
     const jobs = (await (await api(`/actions/runs/${run.id}/jobs`)).json()).jobs || [];
@@ -516,6 +598,7 @@ async function healthCheck(uk) {
       if (run.conclusion !== 'success' || /(?<!gold )news AI failed/.test(log)) news.failed++;
       for (const m of log.matchAll(/(?<!gold )news posted: (\d+)\/10/g)) { news.posted++; news.scores.push(+m[1]); }
       for (const m of log.matchAll(/gold news posted: (\d+)\/10/g)) { goldNews.posted++; goldNews.scores.push(+m[1]); }
+      for (const m of log.matchAll(/altcoin radar posted: (\d+) coins/g)) radarPosts.push(+m[1]);
       if (/gold news AI failed/.test(log)) goldNews.failed++;
       for (const m of log.matchAll(/crypto posted: (\d+)\/10/g)) { crypto.posted++; crypto.scores.push(+m[1]); }
       if (/crypto AI failed/.test(log)) crypto.failed++;
@@ -548,6 +631,7 @@ async function healthCheck(uk) {
   for (const s of missing) lines.push(`❓ **${s}** (${SLOTS[s].ny} ET): no run found - GitHub didn't start it`);
   if (news.runs) lines.push(`${news.failed ? '⚠️' : '📰'} **news**: ${news.runs} checks, ${news.posted} posted${news.scores.length ? ' (scores ' + news.scores.join(', ') + ')' : ''}${news.failed ? `, ${news.failed} failed` : ''}`);
   if (news.runs) lines.push(`${crypto.failed ? '⚠️' : '🪙'} **crypto news**: ${crypto.posted} posted${crypto.scores.length ? ' (scores ' + crypto.scores.join(', ') + ')' : ''}${crypto.failed ? `, ${crypto.failed} checks failed` : ''}`);
+  if (radarPosts.length) lines.push(`🔥 **altcoin radar**: ${radarPosts.length} posted (${radarPosts.join(', ')} coins)`);
   if (news.runs && process.env.GOLD_NEWS_WEBHOOK) lines.push(`${goldNews.failed ? '⚠️' : '🥇'} **gold news**: ${goldNews.posted} posted${goldNews.scores.length ? ' (scores ' + goldNews.scores.join(', ') + ')' : ''}${goldNews.failed ? `, ${goldNews.failed} checks failed` : ''}`);
   if (goldRep.length) lines.push(`🥇 **gold reports**: ${goldRep.join(' · ')}`);
   const bad = lines.filter(l => /^(❌|⚠️|❓)/.test(l) && !/manual test/.test(l)).length;
@@ -558,6 +642,7 @@ async function healthCheck(uk) {
 (async () => {
   const uk = ukNow();
   const slot = pickSlot(uk);
+  if (slot === 'radar') { for (const f of [STATE_FILE, CRYPTO_STATE, GOLD_STATE, REPORT_STATE, GOLD_REPORT_STATE]) try { fs.unlinkSync(f); } catch { } status.slot = 'radar'; await altRadar(); return; }   // manual test of the altcoin radar
   if (!slot || (!SLOTS[slot] && slot !== 'news')) { console.log(`no report due (UK ${uk.time}, cron "${process.env.CRON || ''}") - other season's timer, exiting`); return; }
   if (slot === 'health') { for (const f of [STATE_FILE, CRYPTO_STATE, GOLD_STATE, REPORT_STATE, GOLD_REPORT_STATE]) try { fs.unlinkSync(f); } catch { } console.log('health check started'); await healthCheck(uk); return; }
   // each kind of run only saves its own state file (the other is deleted so the cache step skips it - avoids overwriting newer state)

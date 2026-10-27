@@ -183,14 +183,19 @@ function slotTask(slot, d) {
 }
 
 // tries each model with Google web search first, then each model without it (the free tier may not allow search)
-async function callGemini(system, user, trySearch = true) {
+// 2026-10-27: the free tier allows only 20 requests a DAY on gemini-3.8-flash and 3.6-flash. The news desks (~64 checks a day x 3 desks)
+// were using them up, so the news desks start with the small model and the two big ones are kept for the NQ / gold reports (~10 a day).
+const NEWS_MODELS = (process.env.NEWS_MODEL || 'gemini-3.5-flash-lite,gemini-3.6-flash').split(',');
+const exhausted = new Set();   // models that hit their DAILY limit in this run - not asked again
+async function callGemini(system, user, trySearch = true, models = MODELS) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error('GEMINI_API_KEY not set');
   let lastErr;
   // 503 / 500 / 429 = Google busy for a moment: after every model failed, wait 20 s and go round once more (no web search)
   const rounds = trySearch ? [true, false, 'retry'] : [false, 'retry'];
-  for (const round of rounds) for (const model of MODELS) {
-    if (round === 'retry') { if (!/: (5\d\d|429)\b/.test(lastErr?.message || '')) break; if (model === MODELS[0]) { console.log('all models busy - waiting 20 s and trying again'); await new Promise(r => setTimeout(r, 20000)); } }
+  for (const round of rounds) for (const model of models) {
+    if (exhausted.has(model)) continue;
+    if (round === 'retry') { if (!/: (5\d\d|429)\b/.test(lastErr?.message || '')) break; if (model === models.find(m => !exhausted.has(m))) { console.log('all models busy - waiting 20 s and trying again'); await new Promise(r => setTimeout(r, 20000)); } }
     const search = round === true;
     const tag = `${model}${search ? ' + web search' : ' (no web search)'}`;
     try {
@@ -200,7 +205,13 @@ async function callGemini(system, user, trySearch = true) {
       const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body), signal: AbortSignal.timeout(TIMEOUT.ai) });
       const j = await r.json();
-      if (!r.ok) { lastErr = new Error(`${tag}: ${r.status}`); console.log(`${tag}: ${r.status} ${JSON.stringify(j.error || j).slice(0, 1500)}`); continue; }
+      if (!r.ok) {
+        lastErr = new Error(`${tag}: ${r.status}`);
+        const daily = r.status === 429 && /PerDay|per day/i.test(JSON.stringify(j.error || j));
+        if (daily) exhausted.add(model);
+        console.log(daily ? `${tag}: 429 daily free limit reached - not used again in this run` : `${tag}: ${r.status} ${JSON.stringify(j.error || j).slice(0, 1500)}`);
+        continue;
+      }
       const text = (j.candidates?.[0]?.content?.parts || []).filter(p => p.text && !p.thought).map(p => p.text).join('\n');
       if (text.trim()) { console.log('model used: ' + tag); status.model = tag; return text; }
       lastErr = new Error(`${tag}: empty answer`); console.log(lastErr.message);
@@ -331,7 +342,7 @@ async function post(embed, webhook = hooks('DISCORD_WEBHOOK'), username = 'FUNDA
       if (username !== 'BOT HEALTH') await alert(`⚠️ **${username}** ${et()} ET: posting to the second channel failed (${cut(e.message, 200)}).`);
     }
   }
-  console.log(username === 'FUNDAMENTALS' ? `posted to Discord (${list.length} channel${list.length > 1 ? 's' : ''})` : username === 'GOLD FUNDAMENTALS' ? 'gold report posted to Discord' : 'health message sent');
+  console.log(username === 'FUNDAMENTALS' ? `posted to Discord (${list.length} channel${list.length > 1 ? 's' : ''})` : username === 'GOLD FUNDAMENTALS' ? 'gold report posted to Discord' : username === 'BOT HEALTH' ? 'health message sent' : `${username}: sent to ${list.length} channel${list.length > 1 ? 's' : ''}`);
 }
 
 // ---- breaking news: every 15 min (weekdays 07-22 UK, weekends every 2 h) -> #breaking-news (secret NEWS_WEBHOOK) ----
@@ -462,7 +473,7 @@ async function newsDesk(uk, desk) {
   if (fresh.length) {
     const user = `New York time now ${uk.weekday} ${uk.date} ${et()} ET.\n\nAlready posted in the last 24 h (do not repeat):\n${st.posted.map(p => `- ${et(new Date(p.t))} ET: ${p.h}`).join('\n') || 'none'}\n\nNew headlines:\n${fresh.map(x => `[${x.id}] ${et(new Date(x.when))} ET: ${x.title}${x.src ? ' (' + x.src + ')' : ''}`).join('\n')}`;
     let res;
-    try { res = parseJson(await callGemini(desk.system, user, false)); }
+    try { res = parseJson(await callGemini(desk.system, user, false, NEWS_MODELS)); }
     catch (e) { console.log(`${desk.label} AI failed: ` + e.message); await alert(`⚠️ **${desk.label}** ${et()} ET: the AI check failed (${cut(e.message, 200)}) - ${fresh.length} headlines not checked.`); for (const x of fresh) delete st.seen[x.id]; res = { stories: [] }; }
     const arrow = v => v === 'up' ? '🟢' : v === 'down' ? '🔴' : '⚪';
     for (const s of (res.stories || []).filter(s => s.score >= NEWS_MIN).sort((a, b) => b.score - a.score).slice(0, 2)) {   // 2026-10-23: 31 posts in a day was too many - at most 2 per check

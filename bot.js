@@ -76,11 +76,32 @@ async function marketNumbers() {
   const [nq, tnx, dxy] = await Promise.all([quote('NQ=F'), quote('^TNX'), quote('DX-Y.NYB')]);
   return { nq, tnx, dxy };
 }
+// 2026-10-27: GOLD reports for the second server (mainly gold, short dollar / FX view): secret GOLD_WEBHOOK
+async function goldNumbers() {
+  const [gold, silver, tnx, dxy, eur, jpy, gbp] = await Promise.all([quote('GC=F'), quote('SI=F'), quote('^TNX'), quote('DX-Y.NYB'), quote('EURUSD=X'), quote('JPY=X'), quote('GBPUSD=X')]);
+  return { gold, silver, tnx, dxy, eur, jpy, gbp };
+}
+function goldNumbersText(n) {
+  const out = [];
+  if (n.gold) out.push(`Gold futures ${n.gold.px.toFixed(1)} (${sgn(n.gold.chg, 1)} $, ${sgn(n.gold.pct, 2)}% since the last settlement)`);
+  if (n.silver) out.push(`Silver ${n.silver.px.toFixed(2)} (${sgn(n.silver.pct, 2)}%)`);
+  if (n.tnx) out.push(`US 10-year yield ${n.tnx.px.toFixed(3)}% (${sgn(n.tnx.chg * 100)} bp at the last US close)`);
+  if (n.dxy) out.push(`Dollar index ${n.dxy.px.toFixed(2)} (${sgn(n.dxy.pct, 2)}%)`);
+  if (n.eur) out.push(`EUR/USD ${n.eur.px.toFixed(4)} (${sgn(n.eur.pct, 2)}%)`);
+  if (n.gbp) out.push(`GBP/USD ${n.gbp.px.toFixed(4)} (${sgn(n.gbp.pct, 2)}%)`);
+  if (n.jpy) out.push(`USD/JPY ${n.jpy.px.toFixed(2)} (${sgn(n.jpy.pct, 2)}%)`);
+  return out.join('\n') || 'not available';
+}
+const GOLD_FEEDS = [
+  'https://www.fxstreet.com/rss/news',
+  ...['gold price OR gold futures', 'Federal Reserve OR Powell OR rate cut', 'dollar OR forex OR yen OR euro', 'central bank gold OR gold ETF',
+    'treasury yields OR inflation', 'Iran OR Israel OR Russia OR Ukraine OR tariffs'].map(q => `https://news.google.com/rss/search?q=${encodeURIComponent(q)}+when:1d&hl=en-US&gl=US&ceid=US:en`),
+];
 // free news headlines (RSS titles from the last day), so the report still has news when web search isn't available
-async function headlines() {
+async function headlines(feeds = FEEDS) {
   const unesc = s => s.replace(/<!\[CDATA\[|\]\]>/g, '').replace(/&amp;/g, '&').replace(/&apos;|&#39;|&#x2019;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
   const out = new Map();   // title -> age in hours (2026-10-23: the AI read yesterday's "Nasdaq ends sharply lower" as today's news, so each headline now carries its age)
-  await Promise.all(FEEDS.map(async u => {
+  await Promise.all(feeds.map(async u => {
     try {
       const t = await (await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(TIMEOUT.feed) })).text();
       for (const m of [...t.matchAll(/<item>([\s\S]*?)<\/item>/g)].slice(0, 10)) {
@@ -115,11 +136,13 @@ function nyToUk(ymd, hhmm) {
   const u = ukParts(new Date(t)); return `${u.hour}:${u.minute}`;
 }
 // today's US calendar with forecasts and (once out) actual numbers, UK time. Nasdaq's date parameter returns the previous day, so ask for tomorrow.
-async function calendar(ukDate) {
+// foreign=true (gold reports): also the high-impact releases of the euro zone, UK, Japan, China, Germany, Switzerland (shown as "Country: event")
+const FOREIGN = /^(Euro Zone|United Kingdom|Japan|China|Germany|Switzerland)$/;
+async function calendar(ukDate, foreign = false) {
   try {
     return ((await getJson('https://api.nasdaq.com/api/calendar/economicevents?date=' + addDays(ukDate, 1))).data?.rows || [])
-      .filter(x => x.country === 'United States' && !SKIP.test(x.eventName) && (HIGH.test(x.eventName) || MEDIUM.test(x.eventName)))
-      .map(x => ({ time: nyToUk(ukDate, x.gmt), et: x.gmt, impact: HIGH.test(x.eventName) ? 'High' : 'Medium', title: x.eventName, forecast: clean(x.consensus), previous: clean(x.previous), actual: clean(x.actual) }))
+      .filter(x => !SKIP.test(x.eventName) && ((x.country === 'United States' && (HIGH.test(x.eventName) || MEDIUM.test(x.eventName))) || (foreign && FOREIGN.test(x.country) && HIGH.test(x.eventName))))
+      .map(x => ({ time: nyToUk(ukDate, x.gmt), et: x.gmt, impact: HIGH.test(x.eventName) ? 'High' : 'Medium', title: (x.country === 'United States' ? '' : x.country + ': ') + x.eventName, us: x.country === 'United States', forecast: clean(x.consensus), previous: clean(x.previous), actual: clean(x.actual) }))
       .sort((a, b) => a.time.localeCompare(b.time));
   } catch { return null; }
 }
@@ -233,6 +256,50 @@ function buildEmbed(slot, r, n, extra = {}) {
   };
 }
 
+// gold report: gold bias on top, the dollar's direction and a short line per currency pair under it
+const GOLD_TITLES = { morning: '🥇 GOLD MORNING BRIEF', midday: '🥇 GOLD BEFORE NEW YORK', post1: '⚡ GOLD · DATA RESULT', post2: '⚡ GOLD · DATA RESULT' };
+const GOLD_NEXT = { morning: '08:00 ET', midday: 'after any 08:30 ET data, or 02:00 ET', post1: 'after any 10:00 ET data, or 02:00 ET', post2: '02:00 ET' };
+function goldNums(n) {
+  const nums = [];
+  if (n.gold) nums.push(`**Gold** ${n.gold.px.toFixed(1)} (${sgn(n.gold.pct, 2)}%)`);
+  if (n.silver) nums.push(`**Silver** ${sgn(n.silver.pct, 2)}%`);
+  if (n.tnx) nums.push(`**10y** ${n.tnx.px.toFixed(2)}% (${sgn(n.tnx.chg * 100)} bp)`);
+  if (n.dxy) nums.push(`**DXY** ${n.dxy.px.toFixed(2)} (${sgn(n.dxy.pct, 2)}%)`);
+  return nums;
+}
+function buildGoldEmbed(slot, r, n, extra = {}) {
+  const bias = (r.bias || 'NEUTRAL').toUpperCase(), conf = (r.confidence || '').toUpperCase(), usd = (r.usd || '').toUpperCase();
+  const parts = [], nums = goldNums(n);
+  parts.push(`__**GOLD bias ${bias}${conf ? ' · confidence ' + conf : ''}**__` + (nums.length ? '\n' + nums.join(' · ') : ''));
+  if (r.result?.length) parts.push('**RESULT**\n' + r.result.map(x => '• ' + x).join('\n'));
+  if (r.scenarios?.length && extra.prevTitle) parts.push(`**🎯 CHECKING THE ${extra.prevTitle.toUpperCase()} SCENARIOS**\n` + r.scenarios.join('\n'));
+  if (r.why?.length) parts.push('**WHY**\n' + r.why.map(x => '• ' + x).join('\n'));
+  if (usd || r.fx?.length) parts.push(`**💵 DOLLAR${usd ? ' ' + usd : ''}**` + (r.fx?.length ? '\n' + r.fx.map(x => '• ' + x).join('\n') : ''));
+  if (extra.calendar) parts.push(`**${extra.calendarTitle}**\n` + (extra.calendar.length ? calendarLines(extra.calendar).join('\n') : 'No medium or high impact data.'));
+  if (r.watch?.length) parts.push('**WATCH**\n' + r.watch.map(x => '• ' + x).join('\n'));
+  if (r.change?.length) parts.push('**WHAT WOULD CHANGE IT**\n' + r.change.map(x => '• ' + x).join('\n'));
+  if (r.headlines?.length) parts.push('**HEADLINES**\n' + r.headlines.slice(0, 3).map(x => '• ' + x).join('\n'));
+  return {
+    title: cut(`${GOLD_TITLES[slot]}${r.headline ? ': ' + r.headline : ''}`, 256),
+    description: cut(parts.join('\n\n​\n'), 4000),
+    color: COLOR[bias] ?? COLOR.NEUTRAL,
+    footer: { text: `${DISCLAIMER} · next report ${GOLD_NEXT[slot]} · calendar: Nasdaq` },
+    timestamp: new Date().toISOString(),
+  };
+}
+function backupGoldEmbed(slot, n) {
+  let score = 0, used = 0;
+  if (n.gold) { score += Math.sign(n.gold.chg); used++; }
+  if (n.tnx) { score -= Math.sign(n.tnx.chg); used++; }
+  if (n.dxy) { score -= Math.sign(n.dxy.chg); used++; }
+  const bias = score >= 2 ? 'BULLISH' : score <= -2 ? 'BEARISH' : 'NEUTRAL';
+  return {
+    title: `${GOLD_TITLES[slot]} (basic)`,
+    description: `__**GOLD bias ${bias}**__\n` + goldNumbersText(n) + `\n\nRule: gold up, yield down and dollar down each count bullish (opposite = bearish). Score ${sgn(score)} of ${used}.\nThe full AI report was not available this time.`,
+    color: COLOR[bias], footer: { text: `${DISCLAIMER} · next report ${GOLD_NEXT[slot]}` }, timestamp: new Date().toISOString(),
+  };
+}
+
 // backup: numbers + fixed rule, no AI (only for the scheduled briefs, not for result reports)
 function backupEmbed(slot, n, d) {
   let score = 0, used = 0;
@@ -247,13 +314,24 @@ function backupEmbed(slot, n, d) {
   };
 }
 
-async function post(embed, webhook = process.env.DISCORD_WEBHOOK, username = 'FUNDAMENTALS') {
+// 2026-10-25: every channel can be mirrored to a second channel (e.g. another server): secret <NAME>_2 next to <NAME>
+const hooks = name => [process.env[name], process.env[name + '_2']].filter(Boolean);
+async function post(embed, webhook = hooks('DISCORD_WEBHOOK'), username = 'FUNDAMENTALS') {
   const body = { username, embeds: [embed] };
   if (process.env.DRY === '1') { console.log(JSON.stringify(body, null, 2)); return; }
-  if (!webhook) throw new Error('webhook not set');
-  const r = await fetch(webhook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(TIMEOUT.discord) });
-  if (!r.ok) throw new Error(`Discord ${r.status} ${await r.text()}`);
-  console.log(username === 'FUNDAMENTALS' ? 'posted to Discord' : 'health message sent');
+  const list = [].concat(webhook).filter(Boolean);
+  if (!list.length) throw new Error('webhook not set');
+  for (let k = 0; k < list.length; k++) {
+    try {
+      const r = await fetch(list[k], { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(TIMEOUT.discord) });
+      if (!r.ok) throw new Error(`Discord ${r.status} ${await r.text()}`);
+    } catch (e) {
+      if (k === 0) throw e;   // the main channel failing is handled by the caller as before
+      console.log(`second channel failed: ${e.message}`);   // the mirror failing never stops the main post
+      if (username !== 'BOT HEALTH') await alert(`⚠️ **${username}** ${et()} ET: posting to the second channel failed (${cut(e.message, 200)}).`);
+    }
+  }
+  console.log(username === 'FUNDAMENTALS' ? `posted to Discord (${list.length} channel${list.length > 1 ? 's' : ''})` : username === 'GOLD FUNDAMENTALS' ? 'gold report posted to Discord' : 'health message sent');
 }
 
 // ---- breaking news: every 15 min (weekdays 07-22 UK, weekends every 2 h) -> #breaking-news (secret NEWS_WEBHOOK) ----
@@ -279,6 +357,15 @@ const CRYPTO_FEEDS = [
 ];
 const CRYPTO_TRUSTED = /^(CoinDesk|Cointelegraph|The Block|Decrypt|Blockworks|DL News|The Defiant|Bitcoin Magazine|CryptoSlate|Unchained|Reuters|Bloomberg|CNBC|Yahoo Finance|The Wall Street Journal|WSJ|Financial Times|Fortune|Forbes|Barron's|Axios|Business Insider|MarketWatch|Associated Press|AP News|Investing\.com|Benzinga|Bloomberg\.com|Reuters\.com|Coinbase|Kitco)\b/i;
 const CRYPTO_STATE = path.join(__dirname, 'crypto_state.json');
+// ---- gold news desk -> second server's gold news channel (secret GOLD_NEWS_WEBHOOK), mainly gold, also dollar / FX ----
+const GOLD_NEWS_FEEDS = [
+  'https://www.fxstreet.com/rss/news',
+  ...['gold price OR gold futures OR XAU', 'Federal Reserve OR Powell OR rate cut', 'dollar index OR forex OR yen OR euro OR sterling',
+    'central bank gold OR gold ETF OR PBOC gold', 'ECB OR "Bank of England" OR "Bank of Japan"', 'Iran OR Israel OR Russia OR Ukraine OR missile OR attack', 'tariffs OR sanctions OR trade war']
+    .map(q => `https://news.google.com/rss/search?q=${encodeURIComponent(q)}+when:2h&hl=en-US&gl=US&ceid=US:en`),
+];
+const GOLD_STATE = path.join(__dirname, 'gold_state.json');
+const GOLD_REPORT_STATE = path.join(__dirname, 'gold_report_state.json');
 const STATE_FILE = path.join(__dirname, 'news_state.json');
 const REPORT_STATE = path.join(__dirname, 'report_state.json');   // last report's bias + "what would change it", checked by the next report
 const hash = s => { let h = 0; for (const c of s.toLowerCase().replace(/[^a-z0-9]/g, '')) h = (h * 31 + c.charCodeAt(0)) | 0; return h.toString(36); };
@@ -292,7 +379,7 @@ async function newsItems(feeds, trusted) {
         const g = k => unesc((m[1].match(new RegExp(`<${k}[^>]*>([\\s\\S]*?)<\\/${k}>`)) || [])[1] || '');
         const title = g('title'), when = Date.parse(g('pubDate'));
         if (!title || !(when > 0)) continue;
-        const src = g('source') || [['cnbc', 'CNBC'], ['yahoo', 'Yahoo Finance'], ['coindesk', 'CoinDesk'], ['cointelegraph', 'Cointelegraph'], ['theblock', 'The Block'], ['decrypt', 'Decrypt']].find(([k]) => u.includes(k))?.[1] || '';
+        const src = g('source') || [['cnbc', 'CNBC'], ['yahoo', 'Yahoo Finance'], ['coindesk', 'CoinDesk'], ['cointelegraph', 'Cointelegraph'], ['theblock', 'The Block'], ['decrypt', 'Decrypt'], ['fxstreet', 'FXStreet']].find(([k]) => u.includes(k))?.[1] || '';
         if (!trusted.test(src)) continue;
         const clean = title.replace(/\s+-\s+[^-]{2,40}$/, '');           // Google News adds " - Source" to titles
         out.set(hash(clean), { id: hash(clean), title: clean, src, link: g('link'), when });
@@ -334,6 +421,22 @@ Impact scale (be strict and consistent):
 Rules: group headlines about the same event into one story. Skip stories already posted (listed). Skip opinion pieces, price predictions, "what to watch" previews, explainers and market wrap-ups that only describe moves. Never invent facts beyond the headlines. Plain simple English, bullets under 20 words. Never say buy/sell.
 Answer with ONE JSON object only: {"stories":[{"ids":["headline ids"],"score":6-10,"headline":"short clear headline","direction":"RISK_ON"|"RISK_OFF"|"UNCLEAR","why":["1-2 bullets: why it matters for crypto"],"moves":{"BTC":"up|down|flat","ETH":"up|down|flat","Alts":"up|down|flat"}}]} (RISK_ON = bullish for crypto, RISK_OFF = bearish) - only stories scoring ${NEWS_MIN} or more; {"stories":[]} if none.`,
   },
+  gold: {
+    label: 'gold news', feeds: GOLD_NEWS_FEEDS, trusted: TRUSTED, state: GOLD_STATE, webhook: 'GOLD_NEWS_WEBHOOK', username: 'GOLD NEWS', tag6: '🥇 GOLD NEWS',
+    dir: { RISK_ON: 'Bullish for gold', RISK_OFF: 'Bearish for gold' },
+    system: `You are a news editor for gold (XAU/USD, COMEX gold futures) traders who also watch the dollar and the main currency pairs. You score headlines for how much they can move GOLD first, then the dollar / FX.
+What moves gold: US real yields and the 10-year yield (falling = gold up), the dollar (weaker = gold up), Fed rate expectations (cuts / dovish = gold up), safe-haven demand (war, geopolitical escalation, tariff shocks, stock market stress = gold up; de-escalation = gold down), central bank gold buying and gold ETF flows, China / India demand.
+Impact scale (be strict and consistent):
+10 = market-shaking: war between major powers, emergency Fed move, US debt default scare, a major central bank dumping gold.
+9 = major shock: big military escalation (Middle East, Russia/NATO, Taiwan), surprise Fed decision, very large tariffs, a G7 currency in crisis.
+8 = clearly moves gold: Fed chair clearly dovish/hawkish shift, big CPI/NFP surprise headline, ceasefire or peace deal, record central bank buying (e.g. PBOC), gold at a record high, Japan intervening in the yen.
+7 = notable: Fed speakers, ECB/BoE/BoJ decisions or surprises, notable geopolitical news, large gold ETF flows, big tariff threats.
+6 = relevant but small or brief: second-tier data, regional Fed speakers, smaller geopolitical warnings, 1-2% moves in gold or the dollar with a clear reason.
+5 or less = normal news flow, technical price forecasts and chart levels ("Price Forecast", "Technical Analysis"), daily wrap-ups: ignore.
+Follow-ups to a story already posted: only a genuinely new development, at most 7. Prices in headlines may be hours old - never call an old level the current one. Skip a story when a newer or opposite story on the same subject was already posted.
+Rules: group headlines about the same event into one story. Skip stories already posted (listed). Skip opinion pieces, previews and explainers. Never invent facts beyond the headlines. Plain simple English, bullets under 20 words. Never say buy/sell.
+Answer with ONE JSON object only: {"stories":[{"ids":["headline ids"],"score":6-10,"headline":"short clear headline","direction":"RISK_ON"|"RISK_OFF"|"UNCLEAR","why":["1-2 bullets: why it matters for gold (and the dollar if relevant)"],"moves":{"Gold":"up|down|flat","Dollar":"up|down|flat","EUR/USD":"up|down|flat","USD/JPY":"up|down|flat"}}]} (RISK_ON = bullish for gold, RISK_OFF = bearish for gold) - only stories scoring ${NEWS_MIN} or more; {"stories":[]} if none.`,
+  },
 };
 async function newsCheck(uk) {
   console.log('news check started');
@@ -341,7 +444,7 @@ async function newsCheck(uk) {
   const nyHr = +new Intl.DateTimeFormat('en-GB', { timeZone: 'America/New_York', hour: '2-digit', hourCycle: 'h23' }).format(new Date());
   if (day >= 1 && day <= 5 && (nyHr < 2 || nyHr >= 18)) { console.log(`news: outside 02:00-18:00 New York time (UK ${hr}h)`); return; }
   for (const desk of Object.values(DESKS)) {
-    if (!process.env[desk.webhook] && process.env.DRY !== '1') { console.log(`${desk.label}: no ${desk.webhook} secret - skipped`); continue; }
+    if (!hooks(desk.webhook).length && process.env.DRY !== '1') { console.log(`${desk.label}: no ${desk.webhook} secret - skipped`); continue; }
     await newsDesk(uk, desk);
   }
 }
@@ -373,7 +476,7 @@ async function newsDesk(uk, desk) {
         description: cut(`**${s.headline}**\n\n​\n__**${dir}**__\n${(s.why || []).map(x => '• ' + x).join('\n\n')}${moves ? `\n\n​\n**Likely moves:** ${moves}` : ''}`, 4000),   // ​ line = wider gap
         color: s.direction === 'RISK_OFF' ? COLOR.BEARISH : s.direction === 'RISK_ON' ? COLOR.BULLISH : COLOR.NEUTRAL,
         footer: { text: `${t ? t + ' ET · ' : ''}${DISCLAIMER}` }, timestamp: new Date().toISOString(),
-      }, process.env[desk.webhook], desk.username);
+      }, hooks(desk.webhook), desk.username);
       st.posted.push({ t: now, h: s.headline });
       console.log(`${desk.label} posted: ${s.score}/10 ${s.headline}`);
     }
@@ -392,15 +495,17 @@ async function healthCheck(uk) {
   const repo = process.env.GITHUB_REPOSITORY, gh = { Authorization: `Bearer ${process.env.GITHUB_TOKEN}`, Accept: 'application/vnd.github+json', 'User-Agent': 'fundamentals-bot' };
   const api = async p => { const r = await fetch('https://api.github.com/repos/' + repo + p, { headers: gh, signal: AbortSignal.timeout(TIMEOUT.feed) }); if (!r.ok) throw new Error(`GitHub ${r.status} ${p}`); return r; };
   const runs = (await (await api(`/actions/runs?created=%3E%3D${uk.date}&per_page=100`)).json()).workflow_runs || [];
-  const seen = {}, lines = [], news = { runs: 0, posted: 0, failed: 0, scores: [] }, crypto = { posted: 0, failed: 0, scores: [] };
+  const seen = {}, lines = [], news = { runs: 0, posted: 0, failed: 0, scores: [] }, crypto = { posted: 0, failed: 0, scores: [] }, goldNews = { posted: 0, failed: 0, scores: [] }, goldRep = [];
   for (const run of runs.sort((a, b) => a.created_at.localeCompare(b.created_at))) {
     if (run.id === +process.env.GITHUB_RUN_ID) continue;
     const jobs = (await (await api(`/actions/runs/${run.id}/jobs`)).json()).jobs || [];
     let log = ''; try { if (jobs[0]) log = await (await api(`/actions/jobs/${jobs[0].id}/logs`)).text(); } catch { }
     if (/news check started/.test(log)) {                                    // news checks: one summary line, not one per run
       news.runs++;
-      if (run.conclusion !== 'success' || /news AI failed/.test(log)) news.failed++;
-      for (const m of log.matchAll(/news posted: (\d+)\/10/g)) { news.posted++; news.scores.push(+m[1]); }
+      if (run.conclusion !== 'success' || /(?<!gold )news AI failed/.test(log)) news.failed++;
+      for (const m of log.matchAll(/(?<!gold )news posted: (\d+)\/10/g)) { news.posted++; news.scores.push(+m[1]); }
+      for (const m of log.matchAll(/gold news posted: (\d+)\/10/g)) { goldNews.posted++; goldNews.scores.push(+m[1]); }
+      if (/gold news AI failed/.test(log)) goldNews.failed++;
       for (const m of log.matchAll(/crypto posted: (\d+)\/10/g)) { crypto.posted++; crypto.scores.push(+m[1]); }
       if (/crypto AI failed/.test(log)) crypto.failed++;
       continue;
@@ -409,7 +514,9 @@ async function healthCheck(uk) {
       if (run.status !== 'completed' && !/health check started/.test(log)) lines.push(`⏳ run #${run.run_number} still running`);
       continue;
     }
-    const slot = (log.match(/report: (\w+)/) || [])[1];
+    const slot = (log.match(/(?<!gold )report: (\w+)/) || [])[1];
+    const gslot = (log.match(/gold report: (\w+)/) || [])[1];   // the gold report made in the same run (second server)
+    if (gslot) goldRep.push(`${gslot} ${/gold report posted/.test(log) ? (/gold AI failed/.test(log) ? '⚠️ basic' : '✅') : /gold AI failed/.test(log) ? '❌' : '⏭️'}`);
     if (!slot && /no report due/.test(log)) continue;                       // the other season's timer
     const at = et(new Date(run.updated_at)) + ' ET', late = Math.round((Date.parse(run.run_started_at) - Date.parse(run.created_at)) / 60e3);
     const manual = run.event === 'workflow_dispatch' && !/started by timer/.test(log) ? ' (manual test)' : '';
@@ -430,6 +537,8 @@ async function healthCheck(uk) {
   for (const s of missing) lines.push(`❓ **${s}** (${SLOTS[s].ny} ET): no run found - GitHub didn't start it`);
   if (news.runs) lines.push(`${news.failed ? '⚠️' : '📰'} **news**: ${news.runs} checks, ${news.posted} posted${news.scores.length ? ' (scores ' + news.scores.join(', ') + ')' : ''}${news.failed ? `, ${news.failed} failed` : ''}`);
   if (news.runs) lines.push(`${crypto.failed ? '⚠️' : '🪙'} **crypto news**: ${crypto.posted} posted${crypto.scores.length ? ' (scores ' + crypto.scores.join(', ') + ')' : ''}${crypto.failed ? `, ${crypto.failed} checks failed` : ''}`);
+  if (news.runs && process.env.GOLD_NEWS_WEBHOOK) lines.push(`${goldNews.failed ? '⚠️' : '🥇'} **gold news**: ${goldNews.posted} posted${goldNews.scores.length ? ' (scores ' + goldNews.scores.join(', ') + ')' : ''}${goldNews.failed ? `, ${goldNews.failed} checks failed` : ''}`);
+  if (goldRep.length) lines.push(`🥇 **gold reports**: ${goldRep.join(' · ')}`);
   const bad = lines.filter(l => /^(❌|⚠️|❓)/.test(l) && !/manual test/.test(l)).length;
   if (runs.length >= 100) lines.push('(only the first 100 runs of the day were checked)');   // manual tests don't count as problems
   await alert(`**🩺 BOT HEALTH · ${uk.weekday} ${uk.date}** - ${bad ? bad + ' problem(s)' : 'all good'}\n\n${lines.join('\n') || 'no runs today'}`, bad ? 0xf85149 : 0x3fb950);
@@ -439,11 +548,70 @@ async function healthCheck(uk) {
   const uk = ukNow();
   const slot = pickSlot(uk);
   if (!slot || (!SLOTS[slot] && slot !== 'news')) { console.log(`no report due (UK ${uk.time}, cron "${process.env.CRON || ''}") - other season's timer, exiting`); return; }
-  if (slot === 'health') { for (const f of [STATE_FILE, CRYPTO_STATE, REPORT_STATE]) try { fs.unlinkSync(f); } catch { } console.log('health check started'); await healthCheck(uk); return; }
+  if (slot === 'health') { for (const f of [STATE_FILE, CRYPTO_STATE, GOLD_STATE, REPORT_STATE, GOLD_REPORT_STATE]) try { fs.unlinkSync(f); } catch { } console.log('health check started'); await healthCheck(uk); return; }
   // each kind of run only saves its own state file (the other is deleted so the cache step skips it - avoids overwriting newer state)
-  for (const f of slot === 'news' ? [REPORT_STATE] : [STATE_FILE, CRYPTO_STATE]) try { fs.unlinkSync(f); } catch { }
+  for (const f of slot === 'news' ? [REPORT_STATE, GOLD_REPORT_STATE] : [STATE_FILE, CRYPTO_STATE, GOLD_STATE]) try { fs.unlinkSync(f); } catch { }
   if (slot === 'news') { status.slot = 'news'; await newsCheck(uk); return; }
   status.slot = slot;
+  // 2026-10-27: the same run also makes the GOLD report for the second server (morning, midday and the data results), after the NQ one
+  let err = null;
+  try { await nqReport(uk, slot); } catch (e) { err = e; }
+  if (GOLD_TITLES[slot] && (process.env.GOLD_WEBHOOK || process.env.DRY === '1')) {
+    try { await goldReport(uk, slot); }
+    catch (e) { console.log('gold AI failed: ' + e.message); await alert(`⚠️ **gold ${slot}** ${et()} ET: the gold report failed (${cut(e.message, 300)}).`); }
+  }
+  if (err) throw err;
+})().then(() => process.exit(0), async e => { console.error(e); await alert(`❌ **${status.slot || 'bot'}**: crashed - ${cut(e.message, 500)}`); process.exit(1); });
+
+async function goldReport(uk, slot) {
+  console.log(`gold report: ${slot}`);
+  const [n, news, cal] = await Promise.all([goldNumbers(), headlines(GOLD_FEEDS), calendar(uk.date, true)]);
+  const today = cal || [];
+  console.log(`gold prices: ${n.gold ? 'gold ok' : 'gold missing'}, ${n.dxy ? 'DXY ok' : 'DXY missing'} · headlines: ${news.length} · calendar: ${cal ? today.length + ' events' : 'missing'}`);
+  const toMin = t => +t.slice(0, 2) * 60 + +t.slice(3, 5), nowMin = toMin(uk.time);
+  const extra = {};
+  if (slot === 'post1' || slot === 'post2') {
+    const w = t => toMin(nyToUk(uk.date, t));
+    const [a, b] = slot === 'post1' ? [w('07:25'), w('08:35')] : [w('09:40'), w('10:05')];
+    const due = today.filter(e => e.us && toMin(e.time) >= a && toMin(e.time) <= b);
+    if (cal && !due.length) { console.log('gold: no US release in this window, nothing to report'); return; }
+    extra.calendar = due; extra.calendarTitle = 'RELEASED (ET)';
+  }
+  if (slot === 'morning') { extra.calendar = today; extra.calendarTitle = 'TODAY (ET)'; }
+  if (slot === 'midday') { extra.calendar = today.filter(e => toMin(e.time) > nowMin); extra.calendarTitle = 'STILL TO COME TODAY (ET)'; }
+  if (!cal) delete extra.calendar;
+  let prev = null;
+  try { prev = JSON.parse(fs.readFileSync(GOLD_REPORT_STATE, 'utf8')); } catch { }
+  if (!prev || prev.date !== uk.date || prev.slot === slot || !(prev.change || []).length) prev = null;
+  extra.prevTitle = prev && prev.title.replace(/^\S+\s/, '');
+  const task = { morning: 'GOLD MORNING BRIEF before London. Cover overnight news for gold and the dollar, today\'s calendar (ET times, with forecasts) and what matters most for gold today.',
+    midday: 'GOLD BEFORE NEW YORK. What changed since the morning for gold and the dollar; the next US release and what result would flip the gold bias.',
+    post1: 'GOLD DATA RESULT. Report the US release(s) listed as released: actual vs forecast, the reaction in gold, yields and the dollar, and whether the gold bias changes.',
+    post2: 'GOLD DATA RESULT. Report the US release(s) listed as released: actual vs forecast, the reaction in gold, yields and the dollar, and whether the gold bias changes.' }[slot];
+  const system = fs.readFileSync(path.join(__dirname, 'prompt_gold.md'), 'utf8');
+  const user = `Today is ${uk.weekday} ${uk.date}, New York time now ${et()} ET. Write every time as New York time, like "08:30 ET".\nReport type: ${task}\n\n` +
+    (prev ? `Earlier today the ${extra.prevTitle} (at ${prev.time} ET) had GOLD bias ${prev.bias} and said these would change it:\n${prev.change.map(c => '- ' + c).join('\n')}\n` +
+      `In "scenarios", check each one: start with "✅ Happened", "❌ Didn't happen" or "⏳ Not known yet", then the evidence in a few words and what it means for the gold bias. Your bias now must agree with what happened.\n\n` : '') +
+    `Latest prices (delayed, from a free feed; use these numbers):\n${goldNumbersText(n)}\n\n` +
+    `Economic calendar today (US medium/high impact + big foreign releases; "actual" = already released):\n${cal ? (calendarLines(today).join('\n').replace(/\*\*/g, '') || 'nothing medium/high today') : 'not available'}\n\n` +
+    `Headlines (free news feeds, newest first, each marked with its age). Anything older than about 12 h is from the previous session: do not describe it as happening today, and when it disagrees with today's price change above, trust the price change:\n${news.map(h => '- ' + h).join('\n') || 'none'}\n\n` +
+    `Answer with the JSON object only.`;
+  let embed;
+  try {
+    const r = parseJson(await callGemini(system, user, false));
+    if (r.skip) { console.log('gold: nothing to report for this slot today'); return; }
+    embed = buildGoldEmbed(slot, r, n, extra);
+    if ((r.change || []).length) fs.writeFileSync(GOLD_REPORT_STATE, JSON.stringify({ date: uk.date, slot, time: et(), title: GOLD_TITLES[slot], bias: (r.bias || 'NEUTRAL').toUpperCase(), change: r.change }));
+  } catch (e) {
+    console.log('gold AI failed: ' + e.message);
+    if (!['morning', 'midday'].includes(slot)) { await alert(`⚠️ **gold ${slot}** ${et()} ET: the gold AI report failed (${cut(e.message, 300)}) - nothing posted.`); return; }
+    await alert(`⚠️ **gold ${slot}** ${et()} ET: the gold AI report failed (${cut(e.message, 300)}) - a basic gold report was posted instead.`);
+    embed = backupGoldEmbed(slot, n);
+  }
+  await post(embed, process.env.GOLD_WEBHOOK, 'GOLD FUNDAMENTALS');
+}
+
+async function nqReport(uk, slot) {
   console.log(`report: ${slot} · UK ${uk.weekday} ${uk.date} ${uk.time}`);
   const t0 = Date.now();
   // morning: earnings for the rest of the week; earnings report: today only
@@ -519,4 +687,4 @@ async function healthCheck(uk) {
   }
   if (!cal) await alert(`⚠️ **${slot}** ${et()} ET: the Nasdaq calendar could not be read - report posted without it.`, 0xf0b232);
   await post(embed);
-})().then(() => process.exit(0), async e => { console.error(e); await alert(`❌ **${status.slot || 'bot'}**: crashed - ${cut(e.message, 500)}`); process.exit(1); });
+}

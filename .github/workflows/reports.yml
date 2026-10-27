@@ -57,6 +57,7 @@ jobs:
           # second server: gold reports (mainly gold + short dollar/FX view) and gold news
           GOLD_WEBHOOK: ${{ secrets.GOLD_WEBHOOK }}
           GOLD_NEWS_WEBHOOK: ${{ secrets.GOLD_NEWS_WEBHOOK }}
+          GOLD_NEWS_WEBHOOK_2: ${{ secrets.GOLD_NEWS_WEBHOOK_2 }}
           # altcoin radar (every 4 h) - main server + second server
           ALTCOIN_WEBHOOK: ${{ secrets.ALTCOIN_WEBHOOK }}
           ALTCOIN_WEBHOOK_2: ${{ secrets.ALTCOIN_WEBHOOK_2 }}

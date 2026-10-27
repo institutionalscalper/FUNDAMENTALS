@@ -11,7 +11,7 @@ on:
         required: true
         default: morning
         type: choice
-        options: [morning, midday, post1, preny, post2, earnings, health, news, auto]
+        options: [morning, midday, post1, preny, post2, earnings, health, news, radar, auto]
 
 permissions:
   actions: read      # lets the health check read today's runs and logs
@@ -57,6 +57,9 @@ jobs:
           # second server: gold reports (mainly gold + short dollar/FX view) and gold news
           GOLD_WEBHOOK: ${{ secrets.GOLD_WEBHOOK }}
           GOLD_NEWS_WEBHOOK: ${{ secrets.GOLD_NEWS_WEBHOOK }}
+          # altcoin radar (every 4 h) - main server + second server
+          ALTCOIN_WEBHOOK: ${{ secrets.ALTCOIN_WEBHOOK }}
+          ALTCOIN_WEBHOOK_2: ${{ secrets.ALTCOIN_WEBHOOK_2 }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CRON: ${{ github.event.schedule }}
           SLOT: ${{ github.event.inputs.slot }}

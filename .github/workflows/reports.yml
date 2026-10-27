@@ -32,12 +32,15 @@ jobs:
           path: |
             news_state.json
             crypto_state.json
+            gold_state.json
           key: news-state-${{ github.run_id }}
           restore-keys: news-state-
-      # the reports remember the last report's "what would change it" points (report_state.json)
+      # the reports remember the last report's "what would change it" points (report_state.json, gold_report_state.json)
       - uses: actions/cache/restore@v4
         with:
-          path: report_state.json
+          path: |
+            report_state.json
+            gold_report_state.json
           key: report-state-${{ github.run_id }}
           restore-keys: report-state-
       - run: node bot.js
@@ -47,18 +50,28 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           HEALTH_WEBHOOK: ${{ secrets.HEALTH_WEBHOOK }}
+          # optional second channels (same posts mirrored, e.g. another server)
+          DISCORD_WEBHOOK_2: ${{ secrets.DISCORD_WEBHOOK_2 }}
+          NEWS_WEBHOOK_2: ${{ secrets.NEWS_WEBHOOK_2 }}
+          CRYPTO_WEBHOOK_2: ${{ secrets.CRYPTO_WEBHOOK_2 }}
+          # second server: gold reports (mainly gold + short dollar/FX view) and gold news
+          GOLD_WEBHOOK: ${{ secrets.GOLD_WEBHOOK }}
+          GOLD_NEWS_WEBHOOK: ${{ secrets.GOLD_NEWS_WEBHOOK }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CRON: ${{ github.event.schedule }}
           SLOT: ${{ github.event.inputs.slot }}
       - uses: actions/cache/save@v4
-        if: always() && hashFiles('news_state.json', 'crypto_state.json') != ''
+        if: always() && hashFiles('news_state.json', 'crypto_state.json', 'gold_state.json') != ''
         with:
           path: |
             news_state.json
             crypto_state.json
+            gold_state.json
           key: news-state-${{ github.run_id }}
       - uses: actions/cache/save@v4
-        if: always() && hashFiles('report_state.json') != ''
+        if: always() && hashFiles('report_state.json', 'gold_report_state.json') != ''
         with:
-          path: report_state.json
+          path: |
+            report_state.json
+            gold_report_state.json
           key: report-state-${{ github.run_id }}

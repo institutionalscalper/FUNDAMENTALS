@@ -224,7 +224,12 @@ async function callGemini(system, user, trySearch = true, models = MODELS, json 
 function parseJson(text) {
   const a = text.indexOf('{'), b = text.lastIndexOf('}');
   if (a < 0 || b <= a) throw new Error('no JSON in the answer');
-  return JSON.parse(text.slice(a, b + 1));
+  const body = text.slice(a, b + 1);
+  try { return JSON.parse(body); }
+  catch (e) {
+    // 2026-10-29 health: flash-lite sent broken JSON twice ("Expected property name or '}'") - light repair: trailing commas, comments
+    try { return JSON.parse(body.replace(/\/\/[^\n"]*$/gm, '').replace(/,\s*([}\]])/g, '$1')); } catch { throw e; }
+  }
 }
 
 const cut = (s, n) => (s = String(s || '')).length > n ? s.slice(0, n - 1) + '…' : s;
@@ -615,9 +620,16 @@ async function newsDesk(uk, desk) {
   st.posted = (st.posted || []).filter(p => now - p.t < 864e5);
   if (fresh.length) {
     const user = `New York time now ${uk.weekday} ${uk.date} ${et()} ET.\n\nAlready posted in the last 24 h (do not repeat):\n${st.posted.map(p => `- ${et(new Date(p.t))} ET: ${p.h}`).join('\n') || 'none'}\n\nNew headlines:\n${fresh.map(x => `[${x.id}] ${et(new Date(x.when))} ET: ${x.title}${x.src ? ' (' + x.src + ')' : ''}`).join('\n')}`;
-    let res;
-    try { res = parseJson(await callGemini(desk.system, user, false, NEWS_MODELS, true)); }
-    catch (e) { console.log(`${desk.label} AI failed: ` + e.message); await alert(`⚠️ **${desk.label}** ${et()} ET: the AI check failed (${cut(e.message, 200)}) - ${fresh.length} headlines not checked.`); for (const x of fresh) delete st.seen[x.id]; res = { stories: [] }; }
+    let res, raw;
+    try { raw = await callGemini(desk.system, user, false, NEWS_MODELS, true); res = parseJson(raw); }
+    catch (e0) {
+      let e = e0;
+      if (raw !== undefined) {   // 2026-10-29: the model answered but the JSON was broken - ask the other model once before giving up
+        console.log(`${desk.label}: broken JSON (${e.message}) - start of the answer: ${cut(raw, 300)} - asking the other model once`);
+        try { res = parseJson(await callGemini(desk.system, user, false, [...NEWS_MODELS].reverse(), true)); } catch (e2) { e = e2; }
+      }
+      if (!res) { console.log(`${desk.label} AI failed: ` + e.message); await alert(`⚠️ **${desk.label}** ${et()} ET: the AI check failed (${cut(e.message, 200)}) - ${fresh.length} headlines not checked.`); for (const x of fresh) delete st.seen[x.id]; res = { stories: [] }; }
+    }
     const arrow = v => v === 'up' ? '🟢' : v === 'down' ? '🔴' : '⚪';
     for (const s of (res.stories || []).filter(s => s.score >= NEWS_MIN).sort((a, b) => b.score - a.score).slice(0, 2)) {   // 2026-10-23: 31 posts in a day was too many - at most 2 per check
       const src = fresh.filter(x => (s.ids || []).map(String).includes(x.id)).sort((a, b) => a.when - b.when)[0] || {};

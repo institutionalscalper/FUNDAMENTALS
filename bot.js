@@ -331,8 +331,8 @@ function backupEmbed(slot, n, d) {
   };
 }
 
-// 2026-10-25: every channel can be mirrored to a second channel (e.g. another server): secret <NAME>_2 next to <NAME>; 2026-10-27: _3 = third server
-const hooks = name => [process.env[name], process.env[name + '_2'], process.env[name + '_3']].filter(Boolean);
+// 2026-10-25: every channel can be mirrored to a second channel (e.g. another server): secret <NAME>_2 next to <NAME>; 2026-10-27: _3 = third server; 2026-11-03: _4 = fourth server
+const hooks = name => [process.env[name], process.env[name + '_2'], process.env[name + '_3'], process.env[name + '_4']].filter(Boolean);
 async function post(embed, webhook = hooks('DISCORD_WEBHOOK'), username = 'FUNDAMENTALS') {
   const body = { username, embeds: [embed] };
   if (process.env.DRY === '1') { console.log(JSON.stringify(body, null, 2)); return; }
@@ -786,7 +786,7 @@ async function goldReport(uk, slot) {
     await alert(`⚠️ **gold ${slot}** ${et()} ET: the gold AI report failed (${cut(e.message, 300)}) - a basic gold report was posted instead.`);
     embed = backupGoldEmbed(slot, n);
   }
-  await post(embed, process.env.GOLD_WEBHOOK, 'GOLD FUNDAMENTALS');
+  await post(embed, hooks('GOLD_WEBHOOK'), 'GOLD FUNDAMENTALS');   // 2026-11-03: mirrored too (GOLD_WEBHOOK_4 = fourth server's fundamentals channel)
 }
 
 async function nqReport(uk, slot) {

@@ -192,11 +192,17 @@ async function callGemini(system, user, trySearch = true, models = MODELS, json 
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error('GEMINI_API_KEY not set');
   let lastErr;
-  // 503 / 500 / 429 = Google busy for a moment: after every model failed, wait 20 s and go round once more (no web search)
-  const rounds = trySearch ? [true, false, 'retry'] : [false, 'retry'];
+  // 503 / 500 / 429 = Google busy for a moment: after every model failed, wait and go round again (no web search)
+  // 2026-11-05 health: 11 failures in one morning (503 "overloaded" / 429 per-minute) with only ONE 20 s retry - now 3 retries, 20 / 45 / 90 s
+  const waits = [20, 45, 90];
+  const rounds = trySearch ? [true, false, 'retry', 'retry', 'retry'] : [false, 'retry', 'retry', 'retry'];
+  let retryNo = 0;
   for (const round of rounds) for (const model of models) {
     if (exhausted.has(model)) continue;
-    if (round === 'retry') { if (!/: (5\d\d|429)\b/.test(lastErr?.message || '')) break; if (model === models.find(m => !exhausted.has(m))) { console.log('all models busy - waiting 20 s and trying again'); await new Promise(r => setTimeout(r, 20000)); } }
+    if (round === 'retry') {
+      if (!/: (5\d\d|429)\b/.test(lastErr?.message || '')) break;
+      if (model === models.find(m => !exhausted.has(m))) { const w = waits[retryNo++] || 90; console.log(`all models busy - waiting ${w} s and trying again`); await new Promise(r => setTimeout(r, w * 1000)); }
+    }
     const search = round === true;
     const tag = `${model}${search ? ' + web search' : ' (no web search)'}`;
     try {
@@ -228,7 +234,18 @@ function parseJson(text) {
   try { return JSON.parse(body); }
   catch (e) {
     // 2026-10-29 health: flash-lite sent broken JSON twice ("Expected property name or '}'") - light repair: trailing commas, comments
-    try { return JSON.parse(body.replace(/\/\/[^\n"]*$/gm, '').replace(/,\s*([}\]])/g, '$1')); } catch { throw e; }
+    // 2026-11-05 health: "Bad control character in string literal" - a raw line break / tab INSIDE a text value: escape those
+    let fixed = '', inStr = false, esc = false;
+    for (const ch of body) {
+      if (inStr) {
+        if (esc) { esc = false; fixed += ch; continue; }
+        if (ch === '\\') { esc = true; fixed += ch; continue; }
+        if (ch === '"') { inStr = false; fixed += ch; continue; }
+        const c = ch.charCodeAt(0);
+        fixed += c < 32 ? (ch === '\n' ? '\\n' : ch === '\r' ? '' : ch === '\t' ? '\\t' : ' ') : ch;
+      } else { if (ch === '"') inStr = true; fixed += ch; }
+    }
+    try { return JSON.parse(fixed.replace(/\/\/[^\n"]*$/gm, '').replace(/,\s*([}\]])/g, '$1')); } catch { throw e; }
   }
 }
 

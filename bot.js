@@ -637,16 +637,27 @@ async function newsDesk(uk, desk) {
   st.posted = (st.posted || []).filter(p => now - p.t < 864e5);
   if (fresh.length) {
     const user = `New York time now ${uk.weekday} ${uk.date} ${et()} ET.\n\nAlready posted in the last 24 h (do not repeat):\n${st.posted.map(p => `- ${et(new Date(p.t))} ET: ${p.h}`).join('\n') || 'none'}\n\nNew headlines:\n${fresh.map(x => `[${x.id}] ${et(new Date(x.when))} ET: ${x.title}${x.src ? ' (' + x.src + ')' : ''}`).join('\n')}`;
-    let res, raw;
+    let res, raw, failedNow = false;
     try { raw = await callGemini(desk.system, user, false, NEWS_MODELS, true); res = parseJson(raw); }
     catch (e0) {
       let e = e0;
       if (raw !== undefined) {   // 2026-10-29: the model answered but the JSON was broken - ask the other model once before giving up
         console.log(`${desk.label}: broken JSON (${e.message}) - start of the answer: ${cut(raw, 300)} - asking the other model once`);
         try { res = parseJson(await callGemini(desk.system, user, false, [...NEWS_MODELS].reverse(), true)); } catch (e2) { e = e2; }
+      } else if (/: (5\d\d|429)\b/.test(e.message || '')) {
+        // 2026-11-05 health: flash-lite 503 through all 3 retries (3.6-flash already used up) - one last try on the big report model
+        const spare = MODELS.filter(m => !NEWS_MODELS.includes(m) && !exhausted.has(m));
+        if (spare.length) { console.log(`${desk.label}: news models busy - one try on ${spare.join(', ')}`);
+          try { res = parseJson(await callGemini(desk.system, user, false, spare, true)); } catch (e2) { e = e2; } }
       }
-      if (!res) { console.log(`${desk.label} AI failed: ` + e.message); await alert(`⚠️ **${desk.label}** ${et()} ET: the AI check failed (${cut(e.message, 200)}) - ${fresh.length} headlines not checked.`); for (const x of fresh) delete st.seen[x.id]; res = { stories: [] }; }
+      if (!res) {
+        // headlines go back to unseen, so the next check (~20 min) looks at them again - only alert when two checks in a row failed
+        failedNow = true; st.aiFails = (st.aiFails || 0) + 1; console.log(`${desk.label} AI failed (${st.aiFails} in a row): ` + e.message);
+        if (st.aiFails >= 2) await alert(`⚠️ **${desk.label}** ${et()} ET: the AI check failed ${st.aiFails} times in a row (${cut(e.message, 200)}) - ${fresh.length} headlines waiting, trying again next check.`);
+        for (const x of fresh) delete st.seen[x.id]; res = { stories: [] };
+      }
     }
+    if (!failedNow) st.aiFails = 0;
     const arrow = v => v === 'up' ? '🟢' : v === 'down' ? '🔴' : '⚪';
     for (const s of (res.stories || []).filter(s => s.score >= NEWS_MIN).sort((a, b) => b.score - a.score).slice(0, 2)) {   // 2026-10-23: 31 posts in a day was too many - at most 2 per check
       const src = fresh.filter(x => (s.ids || []).map(String).includes(x.id)).sort((a, b) => a.when - b.when)[0] || {};

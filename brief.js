@@ -58,13 +58,18 @@ async function makeBrief({ segments, ticker, candles, last, outDir }) {
   const T = tools(); fs.mkdirSync(outDir, { recursive: true });
   const ff = (args, opts = {}) => execFileSync(T.ffmpeg, ['-y', '-loglevel', 'error', ...args], { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 1 << 28, cwd: outDir, ...opts });
   const P = f => path.join(outDir, f);
-  // 1) voice per segment (retry once - the TTS service drops a connection now and then)
+  // 1) voice per segment (the TTS service drops a connection now and then)
+  // 2026-11-05 health: "Stream closed before the synthesis completed" twice in a row with one 3 s retry - now 4 tries (5 / 15 / 30 s apart), fresh folder each try
+  const ttsWaits = [5, 15, 30];
   for (let i = 0; i < segments.length; i++) {
     let ok = false;
-    for (let a = 0; a < 2 && !ok; a++) try {
+    for (let a = 0; a <= ttsWaits.length && !ok; a++) try {
       const tts = new T.tts.MsEdgeTTS(); await tts.setMetadata(process.env.BRIEF_VOICE || 'en-US-AriaNeural', T.tts.OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
-      const d = P('seg' + i); fs.mkdirSync(d, { recursive: true }); const r = await tts.toFile(d, segments[i].say, { rate: '+4%' }); segments[i].audio = r.audioFilePath || r; ok = true;
-    } catch (e) { if (a) throw e; await new Promise(r => setTimeout(r, 3000)); }
+      const d = P('seg' + i); fs.rmSync(d, { recursive: true, force: true }); fs.mkdirSync(d, { recursive: true });
+      const r = await tts.toFile(d, segments[i].say, { rate: '+4%' }); segments[i].audio = r.audioFilePath || r;
+      if (!fs.existsSync(segments[i].audio) || fs.statSync(segments[i].audio).size < 2000) throw new Error('voice file empty');
+      ok = true; try { tts.close(); } catch {}
+    } catch (e) { console.log(`news brief voice ${i + 1}/${segments.length} try ${a + 1}: ${e.message}`); if (a >= ttsWaits.length) throw e; await new Promise(r => setTimeout(r, ttsWaits[a] * 1000)); }
   }
   // 2) join with short pauses; durations from the decoded audio length
   const dur = f => ff(['-i', f, '-f', 's16le', '-ac', '1', '-ar', '8000', '-']).length / 16000;

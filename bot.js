@@ -357,8 +357,15 @@ async function post(embed, webhook = hooks('DISCORD_WEBHOOK'), username = 'FUNDA
   if (!list.length) throw new Error('webhook not set');
   for (let k = 0; k < list.length; k++) {
     try {
-      const r = await fetch(list[k], { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(TIMEOUT.discord) });
-      if (!r.ok) throw new Error(`Discord ${r.status} ${await r.text()}`);
+      // 2026-11-13: Discord 5xx / 429 are usually over in seconds (a 503 lost one mirror post) -> up to 3 tries, 5 s then 15 s apart
+      for (let a = 0; ; a++) {
+        const r = await fetch(list[k], { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(TIMEOUT.discord) });
+        if (r.ok) break;
+        const txt = await r.text();
+        if (a >= 2 || !(r.status >= 500 || r.status === 429)) throw new Error(`Discord ${r.status} ${txt}`);
+        console.log(`Discord ${r.status} on channel ${k + 1}, retrying`);
+        await new Promise(res => setTimeout(res, a === 0 ? 5000 : 15000));
+      }
     } catch (e) {
       if (k === 0) throw e;   // the main channel failing is handled by the caller as before
       console.log(`second channel failed: ${e.message}`);   // the mirror failing never stops the main post

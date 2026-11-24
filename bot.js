@@ -185,13 +185,18 @@ function slotTask(slot, d) {
 // tries each model with Google web search first, then each model without it (the free tier may not allow search)
 // 2026-10-27: the free tier allows only 20 requests a DAY on gemini-3.8-flash and 3.6-flash. The news desks (~64 checks a day x 3 desks)
 // were using them up, so the news desks start with the small model and the two big ones are kept for the NQ / gold reports (~10 a day).
-const NEWS_MODELS = (process.env.NEWS_MODEL || 'gemini-3.5-flash-lite,gemini-3.6-flash').split(',');
+// 2026-11-24 health: post2 + gold post2 failed at 10:11 ET with only flash-lite left - on busy-Google days the news checks (every 15 min,
+// several desks) fell back to 3.6-flash / 3.8-flash and used up their 20-a-day limit before the result reports. News now uses flash-lite
+// ONLY; a failed news check puts its headlines back and the next check (15 min later) tries again, so nothing is lost.
+const NEWS_MODELS = (process.env.NEWS_MODEL || 'gemini-3.5-flash-lite').split(',');
 const exhausted = new Set();   // models that hit their DAILY limit in this run - not asked again
 // json = true: Google returns strict JSON (2026-10-27: flash-lite once sent a broken array - "Expected ',' or ']'" - and 14 headlines went unchecked)
 async function callGemini(system, user, trySearch = true, models = MODELS, json = false) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error('GEMINI_API_KEY not set');
   let lastErr;
+  const tried = {};   // model -> its last result, so a failure alert shows every model (not just the last one tried)
+  const fail = () => { const e = new Error(Object.entries(tried).map(([m, s]) => `${m}: ${s}`).join(' · ') || (lastErr && lastErr.message) || 'no model available'); return e; };
   // 503 / 500 / 429 = Google busy for a moment: after every model failed, wait and go round again (no web search)
   // 2026-11-05 health: 11 failures in one morning (503 "overloaded" / 429 per-minute) with only ONE 20 s retry - now 3 retries, 20 / 45 / 90 s
   const waits = [20, 45, 90];
@@ -216,15 +221,17 @@ async function callGemini(system, user, trySearch = true, models = MODELS, json 
         lastErr = new Error(`${tag}: ${r.status}`);
         const daily = r.status === 429 && /PerDay|per day/i.test(JSON.stringify(j.error || j));
         if (daily) exhausted.add(model);
+        tried[model] = daily ? '429 daily limit used up' : String(r.status);
         console.log(daily ? `${tag}: 429 daily free limit reached - not used again in this run` : `${tag}: ${r.status} ${JSON.stringify(j.error || j).slice(0, 1500)}`);
         continue;
       }
       const text = (j.candidates?.[0]?.content?.parts || []).filter(p => p.text && !p.thought).map(p => p.text).join('\n');
       if (text.trim()) { console.log('model used: ' + tag); status.model = tag; return text; }
-      lastErr = new Error(`${tag}: empty answer`); console.log(lastErr.message);
-    } catch (e) { lastErr = e; console.log(`${tag}: ${e.message}`); }
+      lastErr = new Error(`${tag}: empty answer`); tried[model] = 'empty answer'; console.log(lastErr.message);
+    } catch (e) { lastErr = e; tried[model] = cut(e.message, 60); console.log(`${tag}: ${e.message}`); }
   }
-  throw lastErr;
+  for (const m of models) if (exhausted.has(m) && !tried[m]) tried[m] = '429 daily limit used up (earlier in this run)';
+  throw fail();
 }
 
 function parseJson(text) {
@@ -321,7 +328,7 @@ function buildGoldEmbed(slot, r, n, extra = {}) {
     timestamp: new Date().toISOString(),
   };
 }
-function backupGoldEmbed(slot, n) {
+function backupGoldEmbed(slot, n, rel) {
   let score = 0, used = 0;
   if (n.gold) { score += Math.sign(n.gold.chg); used++; }
   if (n.tnx) { score -= Math.sign(n.tnx.chg); used++; }
@@ -329,13 +336,15 @@ function backupGoldEmbed(slot, n) {
   const bias = score >= 2 ? 'BULLISH' : score <= -2 ? 'BEARISH' : 'NEUTRAL';
   return {
     title: `${GOLD_TITLES[slot]} (basic)`,
-    description: `__**GOLD bias ${bias}**__\n` + goldNumbersText(n) + `\n\nRule: gold up, yield down and dollar down each count bullish (opposite = bearish). Score ${sgn(score)} of ${used}.\nThe full AI report was not available this time.`,
+    description: `__**GOLD bias ${bias}**__\n` + goldNumbersText(n) + releasedText(rel) + `\n\nRule: gold up, yield down and dollar down each count bullish (opposite = bearish). Score ${sgn(score)} of ${used}.\nThe full AI report was not available this time.`,
     color: COLOR[bias], footer: { text: `${DISCLAIMER} · next report ${GOLD_NEXT[slot]}` }, timestamp: new Date().toISOString(),
   };
 }
 
 // backup: numbers + fixed rule, no AI (only for the scheduled briefs, not for result reports)
-function backupEmbed(slot, n, d) {
+// 2026-11-24: result reports (post1 / post2) also get a basic post when the AI is down - the released numbers (actual vs forecast) + prices
+const releasedText = rel => rel && rel.length ? `\n\n**RELEASED (ET)**\n${calendarLines(rel).join('\n')}` : '';
+function backupEmbed(slot, n, d, rel) {
   let score = 0, used = 0;
   if (n.nq) { score += Math.sign(n.nq.chg); used++; }
   if (n.tnx) { score -= Math.sign(n.tnx.chg); used++; }
@@ -343,7 +352,7 @@ function backupEmbed(slot, n, d) {
   const bias = score >= 2 ? 'BULLISH' : score <= -2 ? 'BEARISH' : 'NEUTRAL';
   return {
     title: `${SLOTS[slot].title} (basic)`,
-    description: `__**NQ bias ${bias}**__\n` + numbersText(n) + `\n\nRule: NQ up, yield down and dollar down each count bullish (opposite = bearish). Score ${sgn(score)} of ${used}.\nThe full AI report was not available this time.`,
+    description: `__**NQ bias ${bias}**__\n` + numbersText(n) + releasedText(rel) + `\n\nRule: NQ up, yield down and dollar down each count bullish (opposite = bearish). Score ${sgn(score)} of ${used}.\nThe full AI report was not available this time.`,
     color: COLOR[bias], footer: { text: `${DISCLAIMER} · next report ${SLOTS[slot].next(d)}` }, timestamp: new Date().toISOString(),
   };
 }
@@ -651,12 +660,8 @@ async function newsDesk(uk, desk) {
       if (raw !== undefined) {   // 2026-10-29: the model answered but the JSON was broken - ask the other model once before giving up
         console.log(`${desk.label}: broken JSON (${e.message}) - start of the answer: ${cut(raw, 300)} - asking the other model once`);
         try { res = parseJson(await callGemini(desk.system, user, false, [...NEWS_MODELS].reverse(), true)); } catch (e2) { e = e2; }
-      } else if (/: (5\d\d|429)\b/.test(e.message || '')) {
-        // 2026-11-05 health: flash-lite 503 through all 3 retries (3.6-flash already used up) - one last try on the big report model
-        const spare = MODELS.filter(m => !NEWS_MODELS.includes(m) && !exhausted.has(m));
-        if (spare.length) { console.log(`${desk.label}: news models busy - one try on ${spare.join(', ')}`);
-          try { res = parseJson(await callGemini(desk.system, user, false, spare, true)); } catch (e2) { e = e2; } }
       }
+      // (2026-11-24: the "one try on the big report model" fallback was removed - it used up the report models' daily limit)
       if (!res) {
         // headlines go back to unseen, so the next check (~20 min) looks at them again - only alert when two checks in a row failed
         failedNow = true; st.aiFails = (st.aiFails || 0) + 1; console.log(`${desk.label} AI failed (${st.aiFails} in a row): ` + e.message);
@@ -817,9 +822,8 @@ async function goldReport(uk, slot) {
     if ((r.change || []).length) fs.writeFileSync(GOLD_REPORT_STATE, JSON.stringify({ date: uk.date, slot, time: et(), title: GOLD_TITLES[slot], bias: (r.bias || 'NEUTRAL').toUpperCase(), change: r.change }));
   } catch (e) {
     console.log('gold AI failed: ' + e.message);
-    if (!['morning', 'midday'].includes(slot)) { await alert(`⚠️ **gold ${slot}** ${et()} ET: the gold AI report failed (${cut(e.message, 300)}) - nothing posted.`); return; }
     await alert(`⚠️ **gold ${slot}** ${et()} ET: the gold AI report failed (${cut(e.message, 300)}) - a basic gold report was posted instead.`);
-    embed = backupGoldEmbed(slot, n);
+    embed = backupGoldEmbed(slot, n, extra.calendarTitle === 'RELEASED (ET)' ? extra.calendar : null);
   }
   await post(embed, hooks('GOLD_WEBHOOK'), 'GOLD FUNDAMENTALS');   // 2026-11-03: mirrored too (GOLD_WEBHOOK_4 = fourth server's fundamentals channel)
 }
@@ -894,9 +898,10 @@ async function nqReport(uk, slot) {
     if ((r.change || []).length) fs.writeFileSync(REPORT_STATE, JSON.stringify({ date: uk.date, slot, time: et(), title: SLOTS[slot].title, bias: (r.bias || 'NEUTRAL').toUpperCase(), change: r.change }));
   } catch (e) {
     console.log('AI report failed: ' + e.message);
-    await alert(`⚠️ **${slot}** ${et()} ET: the AI report failed (${cut(e.message, 300)}).\n${['morning', 'midday', 'preny'].includes(slot) ? 'A basic report was posted instead.' : 'Nothing was posted for this result report.'}`);
-    if (!['morning', 'midday', 'preny'].includes(slot)) return;
-    embed = backupEmbed(slot, n, uk.date);
+    const basic = ['morning', 'midday', 'preny', 'post1', 'post2'].includes(slot);   // earnings: no basic version
+    await alert(`⚠️ **${slot}** ${et()} ET: the AI report failed (${cut(e.message, 300)}).\n${basic ? 'A basic report was posted instead' + (extra.calendarTitle === 'RELEASED (ET)' ? ' (released numbers + prices).' : '.') : 'Nothing was posted for this report.'}`);
+    if (!basic) return;
+    embed = backupEmbed(slot, n, uk.date, extra.calendarTitle === 'RELEASED (ET)' ? extra.calendar : null);
   }
   if (!cal) await alert(`⚠️ **${slot}** ${et()} ET: the Nasdaq calendar could not be read - report posted without it.`, 0xf0b232);
   await post(embed);

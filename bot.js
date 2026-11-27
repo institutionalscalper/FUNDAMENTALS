@@ -705,7 +705,7 @@ async function healthCheck(uk) {
   const repo = process.env.GITHUB_REPOSITORY, gh = { Authorization: `Bearer ${process.env.GITHUB_TOKEN}`, Accept: 'application/vnd.github+json', 'User-Agent': 'fundamentals-bot' };
   const api = async p => { const r = await fetch('https://api.github.com/repos/' + repo + p, { headers: gh, signal: AbortSignal.timeout(TIMEOUT.feed) }); if (!r.ok) throw new Error(`GitHub ${r.status} ${p}`); return r; };
   const runs = (await (await api(`/actions/runs?created=%3E%3D${uk.date}&per_page=100`)).json()).workflow_runs || [];
-  const seen = {}, lines = [], news = { runs: 0, posted: 0, failed: 0, scores: [] }, crypto = { posted: 0, failed: 0, scores: [] }, goldNews = { posted: 0, failed: 0, scores: [] }, goldRep = [], radarPosts = [], briefPosts = [];
+  const seen = {}, lines = [], news = { runs: 0, posted: 0, failed: 0, scores: [] }, crypto = { posted: 0, failed: 0, scores: [] }, goldNews = { posted: 0, failed: 0, scores: [] }, goldRep = [], radarPosts = [], briefPosts = [], notStarted = [];
   for (const run of runs.sort((a, b) => a.created_at.localeCompare(b.created_at))) {
     if (run.id === +process.env.GITHUB_RUN_ID) continue;
     const jobs = (await (await api(`/actions/runs/${run.id}/jobs`)).json()).jobs || [];
@@ -720,6 +720,13 @@ async function healthCheck(uk) {
       if (/gold news AI failed/.test(log)) goldNews.failed++;
       for (const m of log.matchAll(/crypto posted: (\d+)\/10/g)) { crypto.posted++; crypto.scores.push(+m[1]); }
       if (/crypto AI failed/.test(log)) crypto.failed++;
+      continue;
+    }
+    // 2026-11-27: GitHub refused every job for a day (private-repo Actions minutes used up): failed in ~2 s with no log at all.
+    // Those runs are summed into ONE line instead of one '(manual test) run failure' line per run.
+    const secs = (Date.parse(run.updated_at) - Date.parse(run.run_started_at || run.created_at)) / 1e3;
+    if (run.status === 'completed' && run.conclusion !== 'success' && !log.trim() && (secs < 30 || !jobs[0] || !(jobs[0].steps || []).length)) {
+      notStarted.push(et(new Date(run.created_at)));
       continue;
     }
     if (/health check started/.test(log) || (run.status !== 'completed' && !log)) {  // other health checks, or a run still going
@@ -745,7 +752,10 @@ async function healthCheck(uk) {
   }
   const nowMin = +uk.time.slice(0, 2) * 60 + +uk.time.slice(3, 5);
   const etMin = t => +t.slice(0, 2) * 60 + +t.slice(3, 5);
+  if (notStarted.length) lines.unshift(`🚫 **GitHub did not start ${notStarted.length} run(s)** (${notStarted[0]}${notStarted.length > 1 ? ' - ' + notStarted[notStarted.length - 1] : ''} ET): failed in seconds with no log - usually Actions minutes used up or a billing problem (GitHub > Settings > Billing and licensing > Usage)`);
   const missing = REPORT_SLOTS.filter(s => !seen[s] && etMin(SLOTS[s].ny) + 30 < etMin(et()));
+  // reports lost to a refused run are already in the line above
+  if (notStarted.length) missing.length = 0;
   for (const s of missing) lines.push(`❓ **${s}** (${SLOTS[s].ny} ET): no run found - GitHub didn't start it`);
   if (news.runs) lines.push(`${news.failed ? '⚠️' : '📰'} **news**: ${news.runs} checks, ${news.posted} posted${news.scores.length ? ' (scores ' + news.scores.join(', ') + ')' : ''}${news.failed ? `, ${news.failed} failed` : ''}`);
   if (news.runs) lines.push(`${crypto.failed ? '⚠️' : '🪙'} **crypto news**: ${crypto.posted} posted${crypto.scores.length ? ' (scores ' + crypto.scores.join(', ') + ')' : ''}${crypto.failed ? `, ${crypto.failed} checks failed` : ''}`);
@@ -753,7 +763,7 @@ async function healthCheck(uk) {
   if (briefPosts.length || process.env.NEWSBRIEF_WEBHOOK) lines.push(`${briefPosts.length ? '🎙️' : '⚠️'} **news brief videos**: ${briefPosts.length} posted${briefPosts.length ? ' (' + briefPosts.join(', ') + ' stories)' : ' (expected 4 on a weekday)'}`);
   if (news.runs && process.env.GOLD_NEWS_WEBHOOK) lines.push(`${goldNews.failed ? '⚠️' : '🥇'} **gold news**: ${goldNews.posted} posted${goldNews.scores.length ? ' (scores ' + goldNews.scores.join(', ') + ')' : ''}${goldNews.failed ? `, ${goldNews.failed} checks failed` : ''}`);
   if (goldRep.length) lines.push(`🥇 **gold reports**: ${goldRep.join(' · ')}`);
-  const bad = lines.filter(l => /^(❌|⚠️|❓)/.test(l) && !/manual test/.test(l)).length;
+  const bad = lines.filter(l => /^(❌|⚠️|❓|🚫)/.test(l) && !/manual test/.test(l)).length;
   if (runs.length >= 100) lines.push('(only the first 100 runs of the day were checked)');   // manual tests don't count as problems
   await alert(`**🩺 BOT HEALTH · ${uk.weekday} ${uk.date}** - ${bad ? bad + ' problem(s)' : 'all good'}\n\n${lines.join('\n') || 'no runs today'}`, bad ? 0xf85149 : 0x3fb950);
 }
